@@ -104,7 +104,7 @@ const char *dont_mount_in_root[] = {
  * container root, but can bind into /run/host instead if it has full
  * filesystem access */
 const char *bind_from_host_in_run[] = {
-  "/lib", "/lib32", "/lib64", "/bin", "/sbin", "/usr", "/etc", NULL
+  "/lib", "/lib32", "/lib64", "/bin", "/sbin", "/usr", "/etc", "/var", NULL
 };
 
 /* We don't want to export paths pointing into these, because they are readonly

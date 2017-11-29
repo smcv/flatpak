@@ -104,7 +104,7 @@ const char *dont_mount_in_root[] = {
  * container root, but can bind into /run/host instead if it has full
  * filesystem access */
 const char *bind_from_host_in_run[] = {
-  "/usr", "/etc", NULL
+  "/lib", "/lib32", "/lib64", "/bin", "/sbin", "/usr", "/etc", NULL
 };
 
 /* We don't want to export paths pointing into these, because they are readonly
@@ -2625,10 +2625,29 @@ exports_add_bwrap_args (FlatpakExports *exports,
 
           if (g_file_test (bind_from_host_in_run[i], G_FILE_TEST_IS_DIR))
             {
+              g_autofree gchar *canonical = flatpak_canonicalize_filename (bind_from_host_in_run[i]);
               g_autofree gchar *dest = g_strdup_printf ("/run/host%s",
                                                         bind_from_host_in_run[i]);
-              flatpak_bwrap_add_args (bwrap, mode, bind_from_host_in_run[i],
-                                      dest, NULL);
+
+              if (g_str_has_prefix (canonical, "/usr/") &&
+                  strcmp (canonical + strlen ("/usr"),
+                          bind_from_host_in_run[i]) == 0)
+                {
+                  /* /foo is a symlink to /usr/foo or usr/foo on the host.
+                   * Make /run/host/foo a symlink to usr/foo in the
+                   * container, so relative symlinks work the same as on
+                   * the host. */
+                  flatpak_bwrap_add_args (bwrap, "--symlink", canonical + 1,
+                                          dest, NULL);
+                }
+              else
+                {
+                  /* /foo is some other directory on the host. Make
+                   * /run/host/foo a copy of the host's /foo in the
+                   * container. */
+                  flatpak_bwrap_add_args (bwrap, mode, bind_from_host_in_run[i],
+                                          dest, NULL);
+                }
             }
         }
     }

@@ -5058,7 +5058,8 @@ add_ld_so_conf (FlatpakBwrap   *bwrap,
 }
 
 static int
-regenerate_ld_cache (GPtrArray      *base_argv_array,
+regenerate_ld_cache (const char     *ldconfig_command,
+                     GPtrArray      *base_argv_array,
                      GArray         *base_fd_array,
                      GFile          *app_id_dir,
                      const char     *checksum,
@@ -5122,7 +5123,7 @@ regenerate_ld_cache (GPtrArray      *base_argv_array,
                           "--proc", "/proc",
                           "--dev", "/dev",
                           "--bind", flatpak_file_get_path_cached (ld_so_dir), "/run/ld-so-cache-dir",
-                          "ldconfig", "-X", "-C", sandbox_cache_path, NULL);
+                          ldconfig_command, "-X", "-C", sandbox_cache_path, NULL);
 
   g_ptr_array_add (bwrap->argv, NULL);
 
@@ -5146,7 +5147,8 @@ regenerate_ld_cache (GPtrArray      *base_argv_array,
   if (!WIFEXITED(exit_status) || WEXITSTATUS(exit_status) != 0)
     {
       g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
-                   _("ldconfig failed, exit status %d"), exit_status);
+                   _("%s failed, exit status %d"),
+                   ldconfig_command, exit_status);
       return -1;
     }
 
@@ -5194,7 +5196,8 @@ flatpak_run_app (const char     *app_ref,
   g_autoptr(GVariant) app_deploy_data = NULL;
   g_autoptr(GFile) app_files = NULL;
   g_autoptr(GFile) runtime_files = NULL;
-  g_autoptr(GFile) bin_ldconfig = NULL;
+  g_autoptr(GFile) ldconfig_file = NULL;
+  const char *ldconfig_command = "/sbin/ldconfig";
   g_autoptr(GFile) app_id_dir = NULL;
   g_autofree char *default_runtime = NULL;
   g_autofree char *default_command = NULL;
@@ -5317,8 +5320,15 @@ flatpak_run_app (const char     *app_ref,
     flatpak_context_merge (app_context, extra_context);
 
   runtime_files = flatpak_deploy_get_files (runtime_deploy);
-  bin_ldconfig = g_file_resolve_relative_path (runtime_files, "bin/ldconfig");
-  if (!g_file_query_exists (bin_ldconfig, NULL))
+  ldconfig_file = g_file_resolve_relative_path (runtime_files, "sbin/ldconfig");
+
+  if (!g_file_query_exists (ldconfig_file, NULL))
+    {
+      ldconfig_command = "/bin/ldconfig";
+      ldconfig_file = g_file_resolve_relative_path (runtime_files, "bin/ldconfig");
+    }
+
+  if (!g_file_query_exists (ldconfig_file, NULL))
     use_ld_so_cache = FALSE;
 
   if (app_deploy != NULL)
@@ -5363,7 +5373,8 @@ flatpak_run_app (const char     *app_ref,
     {
       checksum = calculate_ld_cache_checksum (app_deploy_data, runtime_deploy_data,
 					      app_extensions, runtime_extensions);
-      ld_so_fd = regenerate_ld_cache (bwrap->argv,
+      ld_so_fd = regenerate_ld_cache (ldconfig_command,
+				      bwrap->argv,
 				      bwrap->fds,
 				      app_id_dir,
 				      checksum,

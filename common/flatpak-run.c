@@ -93,9 +93,18 @@ const char *flatpak_context_sockets[] = {
   NULL
 };
 
+/* Basenames in the real root that we don't want to bind into the
+ * container root. */
 const char *dont_mount_in_root[] = {
   ".", "..", "lib", "lib32", "lib64", "bin", "sbin", "usr", "boot", "root",
   "tmp", "etc", "app", "run", "proc", "sys", "dev", "var", NULL
+};
+
+/* Directories in the real root that we don't want to bind into the
+ * container root, but can bind into /run/host instead if it has full
+ * filesystem access */
+const char *bind_from_host_in_run[] = {
+  "/usr", "/etc", NULL
 };
 
 /* We don't want to export paths pointing into these, because they are readonly
@@ -2604,14 +2613,24 @@ exports_add_bwrap_args (FlatpakExports *exports,
 
   if (exports->host_fs != 0)
     {
-      if (g_file_test ("/usr", G_FILE_TEST_IS_DIR))
-	flatpak_bwrap_add_args (bwrap,
-				(exports->host_fs == FLATPAK_FILESYSTEM_MODE_READ_ONLY) ? "--ro-bind" : "--bind",
-				"/usr", "/run/host/usr", NULL);
-      if (g_file_test ("/etc", G_FILE_TEST_IS_DIR))
-	flatpak_bwrap_add_args (bwrap,
-				(exports->host_fs == FLATPAK_FILESYSTEM_MODE_READ_ONLY) ? "--ro-bind" : "--bind",
-				"/etc", "/run/host/etc", NULL);
+      int i;
+      const char *mode = "--ro-bind";
+
+      if (exports->host_fs != FLATPAK_FILESYSTEM_MODE_READ_ONLY)
+        mode = "--bind";
+
+      for (i = 0; bind_from_host_in_run[i] != NULL; i++)
+        {
+          g_assert (bind_from_host_in_run[i][0] == '/');
+
+          if (g_file_test (bind_from_host_in_run[i], G_FILE_TEST_IS_DIR))
+            {
+              g_autofree gchar *dest = g_strdup_printf ("/run/host%s",
+                                                        bind_from_host_in_run[i]);
+              flatpak_bwrap_add_args (bwrap, mode, bind_from_host_in_run[i],
+                                      dest, NULL);
+            }
+        }
     }
 }
 

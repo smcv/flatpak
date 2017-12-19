@@ -1468,7 +1468,8 @@ flatpak_context_load_metadata (FlatpakContext *context,
 void
 flatpak_context_save_metadata (FlatpakContext *context,
                                gboolean        flatten,
-                               GKeyFile       *metakey)
+                               GKeyFile       *metakey,
+                               GVariantDict   *dict)
 {
   g_auto(GStrv) shared = NULL;
   g_auto(GStrv) sockets = NULL;
@@ -1485,6 +1486,11 @@ flatpak_context_save_metadata (FlatpakContext *context,
   FlatpakContextFeatures features_mask = context->features;
   FlatpakContextFeatures features_valid = context->features;
   g_auto(GStrv) groups = NULL;
+  GVariantDict context_dict;
+  g_auto(GVariantBuilder) session_builder;
+  g_auto(GVariantBuilder) system_builder;
+  g_auto(GVariantBuilder) environment_builder;
+  g_autoptr(GHashTable) policy_builders = NULL;
   int i;
 
   if (flatten)
@@ -1512,8 +1518,15 @@ flatpak_context_save_metadata (FlatpakContext *context,
   devices = flatpak_context_devices_to_string (devices_mask, devices_valid);
   features = flatpak_context_features_to_string (features_mask, features_valid);
 
+  /* FIXME: At the moment context is an a{sv}. At the moment it could be
+   * an a{sas}, but do we want to keep the ability to add values that are
+   * not string lists? */
+  g_variant_dict_init (&context_dict, NULL);
+
   if (shared[0] != NULL)
     {
+      g_variant_dict_insert (&context_dict, FLATPAK_METADATA_KEY_SHARED,
+                             "^as", shared);
       g_key_file_set_string_list (metakey,
                                   FLATPAK_METADATA_GROUP_CONTEXT,
                                   FLATPAK_METADATA_KEY_SHARED,
@@ -1521,6 +1534,7 @@ flatpak_context_save_metadata (FlatpakContext *context,
     }
   else
     {
+      g_variant_dict_remove (&context_dict, FLATPAK_METADATA_KEY_SHARED);
       g_key_file_remove_key (metakey,
                              FLATPAK_METADATA_GROUP_CONTEXT,
                              FLATPAK_METADATA_KEY_SHARED,
@@ -1529,6 +1543,8 @@ flatpak_context_save_metadata (FlatpakContext *context,
 
   if (sockets[0] != NULL)
     {
+      g_variant_dict_insert (&context_dict, FLATPAK_METADATA_KEY_SOCKETS,
+                             "^as", sockets);
       g_key_file_set_string_list (metakey,
                                   FLATPAK_METADATA_GROUP_CONTEXT,
                                   FLATPAK_METADATA_KEY_SOCKETS,
@@ -1536,6 +1552,7 @@ flatpak_context_save_metadata (FlatpakContext *context,
     }
   else
     {
+      g_variant_dict_remove (&context_dict, FLATPAK_METADATA_KEY_SOCKETS);
       g_key_file_remove_key (metakey,
                              FLATPAK_METADATA_GROUP_CONTEXT,
                              FLATPAK_METADATA_KEY_SOCKETS,
@@ -1544,6 +1561,8 @@ flatpak_context_save_metadata (FlatpakContext *context,
 
   if (devices[0] != NULL)
     {
+      g_variant_dict_insert (&context_dict, FLATPAK_METADATA_KEY_DEVICES,
+                             "^as", devices);
       g_key_file_set_string_list (metakey,
                                   FLATPAK_METADATA_GROUP_CONTEXT,
                                   FLATPAK_METADATA_KEY_DEVICES,
@@ -1551,6 +1570,7 @@ flatpak_context_save_metadata (FlatpakContext *context,
     }
   else
     {
+      g_variant_dict_remove (&context_dict, FLATPAK_METADATA_KEY_DEVICES);
       g_key_file_remove_key (metakey,
                              FLATPAK_METADATA_GROUP_CONTEXT,
                              FLATPAK_METADATA_KEY_DEVICES,
@@ -1559,6 +1579,8 @@ flatpak_context_save_metadata (FlatpakContext *context,
 
   if (features[0] != NULL)
     {
+      g_variant_dict_insert (&context_dict, FLATPAK_METADATA_KEY_FEATURES,
+                             "^as", features);
       g_key_file_set_string_list (metakey,
                                   FLATPAK_METADATA_GROUP_CONTEXT,
                                   FLATPAK_METADATA_KEY_FEATURES,
@@ -1566,6 +1588,7 @@ flatpak_context_save_metadata (FlatpakContext *context,
     }
   else
     {
+      g_variant_dict_remove (&context_dict, FLATPAK_METADATA_KEY_FEATURES);
       g_key_file_remove_key (metakey,
                              FLATPAK_METADATA_GROUP_CONTEXT,
                              FLATPAK_METADATA_KEY_FEATURES,
@@ -1591,13 +1614,20 @@ flatpak_context_save_metadata (FlatpakContext *context,
             g_ptr_array_add (array, g_strconcat ("!", key, NULL));
         }
 
+      /* FIXME: Can we assume all the items are valid UTF-8? If not, we will
+       * have to escape or otherwise mangle them somehow, for both the
+       * GVariant and the GKeyFile */
       g_key_file_set_string_list (metakey,
                                   FLATPAK_METADATA_GROUP_CONTEXT,
                                   FLATPAK_METADATA_KEY_FILESYSTEMS,
                                   (const char * const *) array->pdata, array->len);
+      g_ptr_array_add (array, NULL);
+      g_variant_dict_insert (&context_dict, FLATPAK_METADATA_KEY_FILESYSTEMS,
+                             "^as", array->pdata);
     }
   else
     {
+      g_variant_dict_remove (&context_dict, FLATPAK_METADATA_KEY_FILESYSTEMS);
       g_key_file_remove_key (metakey,
                              FLATPAK_METADATA_GROUP_CONTEXT,
                              FLATPAK_METADATA_KEY_FILESYSTEMS,
@@ -1608,6 +1638,9 @@ flatpak_context_save_metadata (FlatpakContext *context,
     {
       g_autofree char **keys = (char **) g_hash_table_get_keys_as_array (context->persistent, NULL);
 
+      /* FIXME: Can we assume all the items are valid UTF-8? */
+      g_variant_dict_insert (&context_dict, FLATPAK_METADATA_KEY_PERSISTENT,
+                             "^as", keys);
       g_key_file_set_string_list (metakey,
                                   FLATPAK_METADATA_GROUP_CONTEXT,
                                   FLATPAK_METADATA_KEY_PERSISTENT,
@@ -1615,22 +1648,44 @@ flatpak_context_save_metadata (FlatpakContext *context,
     }
   else
     {
+      g_variant_dict_remove (&context_dict, FLATPAK_METADATA_KEY_PERSISTENT);
       g_key_file_remove_key (metakey,
                              FLATPAK_METADATA_GROUP_CONTEXT,
                              FLATPAK_METADATA_KEY_PERSISTENT,
                              NULL);
     }
 
+  if (dict != NULL)
+    g_variant_dict_insert_value (dict, FLATPAK_METADATA_GROUP_CONTEXT,
+                                 g_variant_dict_end (&context_dict));
+  else
+    g_variant_dict_clear (&context_dict);
+
+  g_variant_builder_init (&session_builder, G_VARIANT_TYPE ("a{ss}"));
+
   g_key_file_remove_group (metakey, FLATPAK_METADATA_GROUP_SESSION_BUS_POLICY, NULL);
   g_hash_table_iter_init (&iter, context->session_bus_policy);
   while (g_hash_table_iter_next (&iter, &key, &value))
     {
       FlatpakPolicy policy = GPOINTER_TO_INT (value);
+
       if (policy > 0)
-        g_key_file_set_string (metakey,
-                               FLATPAK_METADATA_GROUP_SESSION_BUS_POLICY,
-                               (char *) key, flatpak_policy_to_string (policy));
+        {
+          const char *s = flatpak_policy_to_string (policy);
+
+          g_variant_builder_add (&session_builder, "{ss}", key, s);
+          g_key_file_set_string (metakey,
+                                 FLATPAK_METADATA_GROUP_SESSION_BUS_POLICY,
+                                 (char *) key, s);
+        }
     }
+
+  if (dict != NULL)
+    g_variant_dict_insert_value (dict,
+                                 FLATPAK_METADATA_GROUP_SESSION_BUS_POLICY,
+                                 g_variant_builder_end (&session_builder));
+
+  g_variant_builder_init (&system_builder, G_VARIANT_TYPE ("a{ss}"));
 
   g_key_file_remove_group (metakey, FLATPAK_METADATA_GROUP_SYSTEM_BUS_POLICY, NULL);
   g_hash_table_iter_init (&iter, context->system_bus_policy);
@@ -1638,20 +1693,40 @@ flatpak_context_save_metadata (FlatpakContext *context,
     {
       FlatpakPolicy policy = GPOINTER_TO_INT (value);
       if (policy > 0)
-        g_key_file_set_string (metakey,
-                               FLATPAK_METADATA_GROUP_SYSTEM_BUS_POLICY,
-                               (char *) key, flatpak_policy_to_string (policy));
+        {
+          const char *s = flatpak_policy_to_string (policy);
+
+          g_variant_builder_add (&system_builder, "{ss}", key, s);
+          g_key_file_set_string (metakey,
+                                 FLATPAK_METADATA_GROUP_SYSTEM_BUS_POLICY,
+                                 (char *) key, s);
+        }
     }
+
+  if (dict != NULL)
+    g_variant_dict_insert_value (dict, FLATPAK_METADATA_GROUP_SYSTEM_BUS_POLICY,
+                                 g_variant_builder_end (&system_builder));
+
+  g_variant_builder_init (&environment_builder, G_VARIANT_TYPE ("a{ss}"));
 
   g_key_file_remove_group (metakey, FLATPAK_METADATA_GROUP_ENVIRONMENT, NULL);
   g_hash_table_iter_init (&iter, context->env_vars);
   while (g_hash_table_iter_next (&iter, &key, &value))
     {
+      /* FIXME: Can we assume all the items are valid UTF-8? */
+      g_variant_builder_add (&environment_builder, "{ss}", key, value);
       g_key_file_set_string (metakey,
                              FLATPAK_METADATA_GROUP_ENVIRONMENT,
                              (char *) key, (char *) value);
     }
 
+  if (dict != NULL)
+    g_variant_dict_insert_value (dict, FLATPAK_METADATA_GROUP_ENVIRONMENT,
+                                 g_variant_builder_end (&environment_builder));
+
+  policy_builders = g_hash_table_new_full (g_str_hash, g_str_equal,
+                                           g_free,
+                                          (GDestroyNotify) g_variant_builder_unref);
 
   groups = g_key_file_get_groups (metakey, NULL);
   for (i = 0; groups[i] != NULL; i++)
@@ -1670,6 +1745,7 @@ flatpak_context_save_metadata (FlatpakContext *context,
       const char **policy_values = (const char **)value;
       g_autoptr(GPtrArray) new = g_ptr_array_new ();
 
+      /* FIXME: Can we guarantee that all the policy values are UTF-8? */
       for (i = 0; policy_values[i] != NULL; i++)
         {
           const char *policy_value = policy_values[i];
@@ -1680,12 +1756,45 @@ flatpak_context_save_metadata (FlatpakContext *context,
 
       if (new->len > 0)
         {
+          GVariantBuilder *subsystem_builder;
+
           group = g_strconcat (FLATPAK_METADATA_GROUP_PREFIX_POLICY,
                                parts[0], NULL);
           g_key_file_set_string_list (metakey, group, parts[1],
                                       (const char * const*)new->pdata,
                                       new->len);
+
+          /* So that we can use pdata as a GStrv, below */
+          g_ptr_array_add (new, NULL);
+
+          subsystem_builder = g_hash_table_lookup (policy_builders, parts[0]);
+
+          if (subsystem_builder == NULL)
+            {
+              subsystem_builder = g_variant_builder_new (G_VARIANT_TYPE ("{sas}"));
+              /* transfer ownership of subsystem_builder to the hash table */
+              g_hash_table_insert (policy_builders, g_strdup (parts[0]),
+                                   subsystem_builder);
+            }
+
+          g_variant_builder_add (subsystem_builder, "{s^as}", parts[1],
+                                 new->pdata);
         }
+    }
+
+  if (dict != NULL && g_hash_table_size (policy_builders) > 0)
+    {
+      GVariantBuilder policies;
+
+      g_variant_builder_init (&policies, G_VARIANT_TYPE ("a{sa{sas}}"));
+
+      g_hash_table_iter_init (&iter, policy_builders);
+      while (g_hash_table_iter_next (&iter, &key, &value))
+        g_variant_builder_add (&policies, "{s@a{sas}}", key,
+                               g_variant_builder_end (value));
+
+      g_variant_dict_insert_value (dict, FLATPAK_METADATA_VARIANT_KEY_POLICIES,
+                                   g_variant_builder_end (&policies));
     }
 }
 
@@ -3841,7 +3950,7 @@ flatpak_run_add_app_info_args (FlatpakBwrap   *bwrap,
     g_key_file_set_boolean (keyfile, FLATPAK_METADATA_GROUP_INSTANCE,
                             FLATPAK_METADATA_KEY_SYSTEM_BUS_PROXY, TRUE);
 
-  flatpak_context_save_metadata (final_app_context, TRUE, keyfile);
+  flatpak_context_save_metadata (final_app_context, TRUE, keyfile, NULL);
 
   if (!g_key_file_save_to_file (keyfile, tmp_path, error))
     return FALSE;

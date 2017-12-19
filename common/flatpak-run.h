@@ -31,6 +31,8 @@ gboolean flatpak_run_in_transient_unit (const char *app_id,
 
 /* See flatpak-metadata(5) */
 
+/* When serialized into GVariant, [Application] turns into an a{sv} value with
+ * {'Application', <{'command': <'...'>, 'tags': <['awesome']>, ...}>} */
 #define FLATPAK_METADATA_GROUP_APPLICATION "Application"
 #define FLATPAK_METADATA_GROUP_RUNTIME "Runtime"
 #define FLATPAK_METADATA_KEY_COMMAND "command"
@@ -40,6 +42,8 @@ gboolean flatpak_run_in_transient_unit (const char *app_id,
 #define FLATPAK_METADATA_KEY_SDK "sdk"
 #define FLATPAK_METADATA_KEY_TAGS "tags"
 
+/* When serialized into GVariant, [Context] turns into an a{sv} value with
+ * {'Context', <{'shared': <['network, 'ipc']>, ...}>} */
 #define FLATPAK_METADATA_GROUP_CONTEXT "Context"
 #define FLATPAK_METADATA_KEY_SHARED "shared"
 #define FLATPAK_METADATA_KEY_SOCKETS "sockets"
@@ -48,6 +52,8 @@ gboolean flatpak_run_in_transient_unit (const char *app_id,
 #define FLATPAK_METADATA_KEY_DEVICES "devices"
 #define FLATPAK_METADATA_KEY_FEATURES "features"
 
+/* When serialized into GVariant, [Instance] turns into an a{sv} value with
+ * {'Instance', <{'app-path': <'/...'>, 'session-bus-proxy': <true>, ...}>} */
 #define FLATPAK_METADATA_GROUP_INSTANCE "Instance"
 #define FLATPAK_METADATA_KEY_APP_PATH "app-path"
 #define FLATPAK_METADATA_KEY_APP_COMMIT "app-commit"
@@ -62,8 +68,12 @@ gboolean flatpak_run_in_transient_unit (const char *app_id,
 
 #define FLATPAK_METADATA_GROUP_SESSION_BUS_POLICY "Session Bus Policy"
 #define FLATPAK_METADATA_GROUP_SYSTEM_BUS_POLICY "System Bus Policy"
-#define FLATPAK_METADATA_GROUP_PREFIX_POLICY "Policy "
 #define FLATPAK_METADATA_GROUP_ENVIRONMENT "Environment"
+
+/* When serialized into GVariant, [Policy foo] Bar=baz;bar; turns into
+ * {'Policies', {'foo': {'Bar': ['baz', 'bar']}}} */
+#define FLATPAK_METADATA_GROUP_PREFIX_POLICY "Policy "
+#define FLATPAK_METADATA_VARIANT_KEY_POLICIES "Policies"
 
 #define FLATPAK_METADATA_GROUP_PREFIX_EXTENSION "Extension "
 #define FLATPAK_METADATA_KEY_ADD_LD_PATH "add-ld-path"
@@ -151,7 +161,8 @@ gboolean       flatpak_context_load_metadata (FlatpakContext *context,
                                               GError        **error);
 void           flatpak_context_save_metadata (FlatpakContext *context,
                                               gboolean        flatten,
-                                              GKeyFile       *metakey);
+                                              GKeyFile       *metakey,
+                                              GVariantDict   *dict);
 void           flatpak_context_allow_host_fs (FlatpakContext *context);
 void           flatpak_context_set_session_bus_policy (FlatpakContext *context,
                                                        const char     *name,

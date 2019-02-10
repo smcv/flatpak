@@ -4071,9 +4071,13 @@ flatpak_run_setup_base_argv (GPtrArray      *argv_array,
   if (fd_array)
     g_array_append_val (fd_array, group_fd);
 
+  if ((flags & FLATPAK_RUN_FLAG_NO_PROC) == 0)
+    add_args (argv_array,
+              "--proc", "/proc",
+              NULL);
+
   add_args (argv_array,
             "--unshare-pid",
-            "--proc", "/proc",
             "--dir", "/tmp",
             "--dir", "/var/tmp",
             "--dir", "/run/host",

@@ -128,6 +128,14 @@ AC_ARG_WITH([systemduserenvgendir],
     [with_systemduserenvgendir='${prefix}/lib/systemd/user-environment-generators'])
 AC_SUBST([systemduserenvgendir], [$with_systemduserenvgendir])
 
+AC_ARG_WITH([sysusersdir],
+            [AS_HELP_STRING([--with-sysusersdir=DIR],
+                            [Directory for declarative system user creation (default=PREFIX/lib/sysusers.d)])],
+    [],
+    dnl This is deliberately not ${libdir}, as above
+    [with_sysusersdir='${prefix}/lib/sysusers.d'])
+AC_SUBST([sysusersdir], [$with_sysusersdir])
+
 AC_ARG_WITH(system_fonts_dir,
 		AS_HELP_STRING([--with-system-fonts-dir=PATH],[Directory where system fonts are, [default=/usr/share/fonts]]),
             with_system_fonts_dir="$withval", with_system_fonts_dir=/usr/share/fonts)

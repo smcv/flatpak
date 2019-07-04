@@ -35,11 +35,17 @@ polkit_policy_DATA =					\
 %.policy: %.policy.in
 	$(AM_V_GEN) $(MSGFMT) --xml -d $(top_srcdir)/po --template $< -o $@ || cp $< $@
 
+system-helper/sysusers.d/flatpak.conf: system-helper/sysusers.d/flatpak.conf.in Makefile
+	$(AM_V_GEN) $(SED) -e "s|[@]SYSTEM_HELPER_USER[@]|$(SYSTEM_HELPER_USER)|" $< > $@
+
+sysusers_DATA = system-helper/sysusers.d/flatpak.conf
+
 CLEANFILES += \
 	$(dbussystemservice_DATA) \
 	$(polkit_policy_DATA) \
 	$(polkit_rules_DATA) \
 	$(systemdsystemunit_DATA) \
+	$(sysusers_DATA) \
 	$(NULL)
 
 endif
@@ -50,4 +56,5 @@ EXTRA_DIST += \
 	system-helper/org.freedesktop.Flatpak.SystemHelper.service.in \
 	system-helper/org.freedesktop.Flatpak.policy.in \
 	system-helper/org.freedesktop.Flatpak.rules.in \
+	system-helper/sysusers.d/flatpak.conf.in \
 	$(NULL)

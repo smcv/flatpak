@@ -1,0 +1,2 @@
+# Type, Name, ID, GECOS (Home, Shell not used here)
+u @SYSTEM_HELPER_USER@ - "Flatpak system-wide installation helper"

@@ -44,4 +44,10 @@ CLEANFILES += \
 
 endif
 
-EXTRA_DIST += system-helper/org.freedesktop.Flatpak.policy.in system-helper/org.freedesktop.Flatpak.SystemHelper.conf system-helper/org.freedesktop.Flatpak.rules.in system-helper/org.freedesktop.Flatpak.SystemHelper.service.in system-helper/flatpak-system-helper.service.in
+EXTRA_DIST += \
+	system-helper/flatpak-system-helper.service.in \
+	system-helper/org.freedesktop.Flatpak.SystemHelper.conf \
+	system-helper/org.freedesktop.Flatpak.SystemHelper.service.in \
+	system-helper/org.freedesktop.Flatpak.policy.in \
+	system-helper/org.freedesktop.Flatpak.rules.in \
+	$(NULL)

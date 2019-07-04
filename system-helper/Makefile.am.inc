@@ -36,10 +36,10 @@ polkit_policy_DATA =					\
 	$(AM_V_GEN) $(MSGFMT) --xml -d $(top_srcdir)/po --template $< -o $@ || cp $< $@
 
 CLEANFILES += \
-	system-helper/flatpak-system-helper.service \
-	system-helper/org.freedesktop.Flatpak.SystemHelper.service \
-	system-helper/org.freedesktop.Flatpak.policy \
-	system-helper/org.freedesktop.Flatpak.rules \
+	$(dbussystemservice_DATA) \
+	$(polkit_policy_DATA) \
+	$(polkit_rules_DATA) \
+	$(systemdsystemunit_DATA) \
 	$(NULL)
 
 endif

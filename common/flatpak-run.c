@@ -3418,9 +3418,18 @@ check_parental_controls (const char     *app_ref,
   if (app_ref_parts == NULL)
     return FALSE;
 
-  system_bus = g_bus_get_sync (G_BUS_TYPE_SYSTEM, NULL, error);
+  /* If we don't have a system bus then we certainly don't have
+   * parental controls. If this was a real security mechanism, we'd have
+   * to fail closed here (because it's possible to tell 'flatpak run'
+   * a wrong system bus address), but malcontent is already possible
+   * to bypass. */
+  system_bus = g_bus_get_sync (G_BUS_TYPE_SYSTEM, NULL, NULL);
+
   if (system_bus == NULL)
-    return FALSE;
+    {
+      g_debug ("Skipping parental controls because system bus is unavailable");
+      return TRUE;
+    }
 
   manager = mct_manager_new (system_bus);
   app_filter = mct_manager_get_app_filter (manager, getuid (),

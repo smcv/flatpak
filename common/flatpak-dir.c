@@ -7630,8 +7630,18 @@ flatpak_dir_check_parental_controls (FlatpakDir    *self,
   dbus_connection = g_bus_get_sync (G_BUS_TYPE_SYSTEM, cancellable, &local_error);
   if (dbus_connection == NULL)
     {
-      g_propagate_error (error, g_steal_pointer (&local_error));
-      return FALSE;
+      if (self->user)
+        {
+          g_debug ("Skipping parental controls because system bus is unavailable");
+          return TRUE;
+        }
+      else
+        {
+          /* If the system helper can't connect to the system bus then
+           * something has gone horribly wrong */
+          g_propagate_error (error, g_steal_pointer (&local_error));
+          return FALSE;
+        }
     }
 
   if (self->user || self->source_pid == 0)

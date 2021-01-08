@@ -2996,7 +2996,8 @@ setup_seccomp (FlatpakBwrap   *bwrap,
 
 static void
 flatpak_run_setup_usr_links (FlatpakBwrap *bwrap,
-                             GFile        *runtime_files)
+                             GFile        *runtime_files,
+                             const char   *sysroot)
 {
   int i;
 
@@ -3015,9 +3016,21 @@ flatpak_run_setup_usr_links (FlatpakBwrap *bwrap,
       if (g_file_query_exists (runtime_subdir, NULL))
         {
           g_autofree char *link = g_strconcat ("usr", subdir, NULL);
+          g_autofree char *create = NULL;
+
+          if (sysroot != NULL)
+            create = g_strconcat (sysroot, subdir, NULL);
+          else
+            create = g_strdup (subdir);
+
           flatpak_bwrap_add_args (bwrap,
-                                  "--symlink", link, subdir,
+                                  "--symlink", link, create,
                                   NULL);
+        }
+      else
+        {
+          g_debug ("%s does not exist",
+                   flatpak_file_get_path_cached (runtime_subdir));
         }
     }
 }
@@ -3179,7 +3192,7 @@ flatpak_run_setup_base_argv (FlatpakBwrap   *bwrap,
                               NULL);
     }
 
-  flatpak_run_setup_usr_links (bwrap, runtime_files);
+  flatpak_run_setup_usr_links (bwrap, runtime_files, NULL);
 
   add_tzdata_args (bwrap, runtime_files);
 
@@ -3448,7 +3461,7 @@ regenerate_ld_cache (GPtrArray    *base_argv_array,
 
   flatpak_bwrap_append_args (bwrap, base_argv_array);
 
-  flatpak_run_setup_usr_links (bwrap, runtime_files);
+  flatpak_run_setup_usr_links (bwrap, runtime_files, NULL);
 
   if (generate_ld_so_conf)
     {

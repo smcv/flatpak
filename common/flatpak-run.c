@@ -2258,6 +2258,73 @@ flatpak_run_add_dconf_args (FlatpakBwrap *bwrap,
   return TRUE;
 }
 
+static gboolean
+flatpak_run_add_xdg_runtime_dir_args (FlatpakBwrap *bwrap,
+                                      const char *app_id,
+                                      FlatpakRunFlags flags,
+                                      GError **error)
+{
+  gboolean sandboxed = (flags & FLATPAK_RUN_FLAG_SANDBOX) != 0;
+
+  g_return_val_if_fail (bwrap != NULL, FALSE);
+  g_return_val_if_fail (app_id != NULL, FALSE);
+  g_return_val_if_fail (error == NULL || *error == NULL, FALSE);
+
+  /* The host and the original instance always have separate instances of
+   * XDG_RUNTIME_DIR, but we want other instances of the app to share it
+   * with the first instance, unless they are specifically protected
+   * (flatpak-spawn --sandbox) in which case each instance gets its own. */
+  if (!sandboxed)
+    {
+      glnx_autofd int lock_fd = -1;
+      g_autofree char *shared_xrd = NULL;
+      g_autofree char *old_flatpak_info = NULL;
+
+      if (!flatpak_instance_ensure_per_app_xdg_runtime_dir (app_id,
+                                                            &lock_fd,
+                                                            &shared_xrd,
+                                                            error))
+        return FALSE;
+
+      /* We create this symlink for backwards compatibility with older
+       * versions of Flatpak that had $XDG_RUNTIME_DIR/flatpak-info as
+       * the documented/preferred path instead of the more modern
+       * /.flatpak-info. We can only create the symlink the first time
+       * we create the shared XDG_RUNTIME_DIR, so we can't use
+       * bwrap --symlink, which fails on error. */
+      old_flatpak_info = g_build_filename (shared_xrd, "flatpak-info", NULL);
+
+      if (symlink ("../../../.flatpak-info", old_flatpak_info) < 0 && errno != EEXIST)
+        g_warning ("Unable to create symlink at %s: %s",
+                   old_flatpak_info, g_strerror (errno));
+
+      /* Hold onto the lock until we execute bwrap */
+      flatpak_bwrap_add_fd (bwrap, glnx_steal_fd (&lock_fd));
+
+      /* Use the xdg-run subdirectory of the per-app directory as this app's
+       * XDG_RUNTIME_DIR, shared between instances */
+      flatpak_bwrap_add_arg (bwrap, "--bind");
+      flatpak_bwrap_add_arg (bwrap, shared_xrd);
+      flatpak_bwrap_add_arg_printf (bwrap, "/run/user/%d", getuid ());
+
+      /* Tell bwrap to keep holding onto the lock on our behalf */
+      flatpak_bwrap_add_arg (bwrap, "--lock-file");
+      flatpak_bwrap_add_arg_printf (bwrap, "/run/user/%d/.ref", getuid ());
+    }
+  else
+    {
+      g_autofree char *old_flatpak_info = g_strdup_printf ("/run/user/%d/flatpak-info",
+                                                           getuid ());
+
+      /* Create the symlink in this instance's private tmpfs */
+      flatpak_bwrap_add_args (bwrap,
+                              "--symlink", "../../../.flatpak-info", old_flatpak_info,
+                              NULL);
+    }
+
+  return TRUE;
+}
+
 gboolean
 flatpak_run_add_app_info_args (FlatpakBwrap       *bwrap,
                                GFile              *app_files,
@@ -2285,7 +2352,6 @@ flatpak_run_add_app_info_args (FlatpakBwrap       *bwrap,
   int fd, fd2, fd3;
   g_autoptr(GKeyFile) keyfile = NULL;
   g_autofree char *runtime_path = NULL;
-  g_autofree char *old_dest = g_strdup_printf ("/run/user/%d/flatpak-info", getuid ());
   const char *group;
   g_autofree char *instance_id = NULL;
   glnx_autofd int lock_fd = -1;
@@ -2433,9 +2499,6 @@ flatpak_run_add_app_info_args (FlatpakBwrap       *bwrap,
                                   "--file", fd, "/.flatpak-info");
   flatpak_bwrap_add_args_data_fd (bwrap,
                                   "--ro-bind-data", fd2, "/.flatpak-info");
-  flatpak_bwrap_add_args (bwrap,
-                          "--symlink", "../../../.flatpak-info", old_dest,
-                          NULL);
 
   /* Tell the application that it's running under Flatpak in a generic way. */
   flatpak_bwrap_add_args (bwrap,
@@ -3660,7 +3723,9 @@ flatpak_run_app (FlatpakDecomposed *app_ref,
   if (!check_sudo (error))
     return FALSE;
 
+  g_return_val_if_fail (app_ref != NULL, FALSE);
   app_id = flatpak_decomposed_dup_id (app_ref);
+  g_return_val_if_fail (app_id != NULL, FALSE);
   app_arch = flatpak_decomposed_dup_arch (app_ref);
 
   /* Check the user is allowed to run this flatpak. */
@@ -3914,6 +3979,12 @@ flatpak_run_app (FlatpakDecomposed *app_ref,
     }
 
   flags |= flatpak_context_get_run_flags (app_context);
+
+  /* We have to set this up before we start mounting things into the
+   * XDG_RUNTIME_DIR in flatpak_run_setup_base_argv() and
+   * flatpak_run_add_app_info_args(), because otherwise it would shadow them. */
+  if (!flatpak_run_add_xdg_runtime_dir_args (bwrap, app_id, flags, error))
+    return FALSE;
 
   if (!flatpak_run_setup_base_argv (bwrap, runtime_files, app_id_dir, app_arch, flags, error))
     return FALSE;

@@ -32,4 +32,9 @@ char *flatpak_instance_allocate_id (char **host_dir_out,
 
 void flatpak_instance_iterate_all_and_gc (GPtrArray *out_instances);
 
+gboolean flatpak_instance_ensure_per_app_xdg_runtime_dir (const char *app_id,
+                                                          int *lock_fd,
+                                                          char **shared_xrd,
+                                                          GError **error);
+
 #endif /* __FLATPAK_INSTANCE_PRIVATE_H__ */

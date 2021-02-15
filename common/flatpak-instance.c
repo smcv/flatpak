@@ -26,6 +26,8 @@
 #include "flatpak-instance-private.h"
 #include "flatpak-enum-types.h"
 
+#include <glib/gi18n-lib.h>
+
 /**
  * SECTION:flatpak-instance
  * @Title: FlatpakInstance
@@ -457,6 +459,76 @@ char *
 flatpak_instance_get_apps_directory (void)
 {
   return flatpak_instance_get_instances_directory ();
+}
+
+/*
+ * @app_id: $FLATPAK_ID
+ * @lock_fd: (out) (not optional): Used to return a lock on the
+ *  per-app directories
+ * @shared_xrd: (out) (not optional): Used to return the path to the
+ *  shared XDG_RUNTIME_DIR
+ *
+ * Create the per-app XDG_RUNTIME_DIR, and take out a non-exclusive lock
+ * XDG_RUNTIME_DIR/.ref.
+ */
+gboolean
+flatpak_instance_ensure_per_app_xdg_runtime_dir (const char *app_id,
+                                                 int *lock_fd_out,
+                                                 char **shared_xrd_out,
+                                                 GError **error)
+{
+  glnx_autofd int lock_fd = -1;
+  g_autofree char *lock_path = NULL;
+  g_autofree char *per_app_parent = NULL;
+  g_autofree char *shared_xrd = NULL;
+  struct flock non_exclusive_lock =
+  {
+    .l_type = F_RDLCK,
+    .l_whence = SEEK_SET,
+    .l_start = 0,
+    .l_len = 0
+  };
+
+  g_return_val_if_fail (app_id != NULL, FALSE);
+  g_return_val_if_fail (lock_fd_out != NULL, FALSE);
+  g_return_val_if_fail (*lock_fd_out == -1, FALSE);
+  g_return_val_if_fail (shared_xrd_out != NULL, FALSE);
+  g_return_val_if_fail (*shared_xrd_out == NULL, FALSE);
+  g_return_val_if_fail (error == NULL || *error == NULL, FALSE);
+
+  per_app_parent = flatpak_instance_get_apps_directory ();
+  shared_xrd = g_build_filename (per_app_parent, app_id, "xdg-run", NULL);
+  lock_path = g_build_filename (shared_xrd, ".ref", NULL);
+
+  if (g_mkdir_with_parents (shared_xrd, 0700) != 0)
+    return glnx_throw_errno_prefix (error,
+                                    _("Unable to create directory %s"),
+                                    shared_xrd);
+
+  /* Take a file lock inside the per-app directory, and hold it during
+   * setup and in bwrap. Anyone trying to clean up unused subdirectories
+   * must first verify that there is an xdg-run/.ref file and take a write
+   * lock on it to ensure the directory is not in use.
+   *
+   * The lock file needs to be something that the app can hold open,
+   * and we might as well use one in the XDG_RUNTIME_DIR, on the
+   * assumption that any other directories we might want to create on a
+   * per-app-ID basis (such as /tmp or /dev/shm) will have a lifetime
+   * no longer than the lifetime of the XDG_RUNTIME_DIR. */
+  lock_fd = open (lock_path, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+
+  /* As with the per-instance directories, there's a race here, because
+   * we can't atomically open and lock the lockfile. We work around
+   * that by only doing GC if the lockfile is "old". */
+  if (lock_fd < 0 ||
+      fcntl (lock_fd, F_SETLK, &non_exclusive_lock) != 0)
+    return glnx_throw_errno_prefix (error,
+                                    _("Unable to lock %s"),
+                                    lock_path);
+
+  *lock_fd_out = glnx_steal_fd (&lock_fd);
+  *shared_xrd_out = g_steal_pointer (&shared_xrd);
+  return TRUE;
 }
 
 /*

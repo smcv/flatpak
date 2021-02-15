@@ -8611,4 +8611,21 @@ flatpak_dconf_path_is_similar (const char *path1,
   return (path1[i1] == '\0');
 }
 
+/*
+ * Return %TRUE if @s consists of one or more digits.
+ * This is the same as Python bytes.isdigit().
+ */
+gboolean
+flatpak_str_is_integer (const char *s)
+{
+  if (s == NULL || *s == '\0')
+    return FALSE;
 
+  for (; *s != '\0'; s++)
+    {
+      if (!g_ascii_isdigit (*s))
+        return FALSE;
+    }
+
+  return TRUE;
+}

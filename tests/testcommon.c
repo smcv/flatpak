@@ -1621,6 +1621,20 @@ test_envp_cmp (void)
   g_free (sort_this);
 }
 
+static void
+test_str_is_integer (void)
+{
+  g_assert_true (flatpak_str_is_integer ("0"));
+  g_assert_true (flatpak_str_is_integer ("1234567890987654356765432121245674"));
+  g_assert_false (flatpak_str_is_integer (NULL));
+  g_assert_false (flatpak_str_is_integer (""));
+  g_assert_false (flatpak_str_is_integer ("0.0"));
+  g_assert_false (flatpak_str_is_integer ("0e0"));
+  g_assert_false (flatpak_str_is_integer ("bees"));
+  g_assert_false (flatpak_str_is_integer ("1234a"));
+  g_assert_false (flatpak_str_is_integer ("a1234"));
+}
+
 int
 main (int argc, char *argv[])
 {
@@ -1650,6 +1664,7 @@ main (int argc, char *argv[])
   g_test_add_func ("/common/dconf-paths", test_dconf_paths);
   g_test_add_func ("/common/decompose-ref", test_decompose);
   g_test_add_func ("/common/envp-cmp", test_envp_cmp);
+  g_test_add_func ("/common/str-is-integer", test_str_is_integer);
 
   g_test_add_func ("/app/looks-like-branch", test_looks_like_branch);
   g_test_add_func ("/app/columns", test_columns);

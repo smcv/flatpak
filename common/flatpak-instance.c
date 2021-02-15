@@ -420,12 +420,43 @@ flatpak_instance_new (const char *dir)
   return self;
 }
 
+/*
+ * Return the directory in which we create a numbered subdirectory per
+ * instance.
+ *
+ * This directory is not shared with Flatpak apps, and we rely on this
+ * for the sandbox boundary.
+ *
+ * This is currently the same as the
+ * flatpak_instance_get_apps_directory(). We can distinguish between
+ * instance IDs and app-IDs because instances are integers, and app-IDs
+ * always contain at least one dot.
+ */
 char *
 flatpak_instance_get_instances_directory (void)
 {
   g_autofree char *user_runtime_dir = flatpak_get_real_xdg_runtime_dir ();
 
   return g_build_filename (user_runtime_dir, ".flatpak", NULL);
+}
+
+/*
+ * Return the directory in which we create a subdirectory per
+ * concurrently running Flatpak app-ID to store app-specific data that
+ * is common to all instances of the same app.
+ *
+ * This directory is not shared with Flatpak apps, and we rely on this
+ * for the sandbox boundary.
+ *
+ * This is currently the same as the
+ * flatpak_instance_get_instances_directory(). We can distinguish between
+ * instance IDs and app-IDs because instances are integers, and app-IDs
+ * always contain at least one dot.
+ */
+char *
+flatpak_instance_get_apps_directory (void)
+{
+  return flatpak_instance_get_instances_directory ();
 }
 
 /*
@@ -520,6 +551,9 @@ flatpak_instance_iterate_all_and_gc (GPtrArray *out_instances)
 
       if (dent == NULL)
         break;
+
+      if (!flatpak_str_is_integer (dent->d_name))
+        continue;
 
       if (dent->d_type == DT_DIR)
         {

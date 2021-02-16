@@ -647,6 +647,94 @@ flatpak_instance_new_for_id (const char *id)
   return flatpak_instance_new (dir);
 }
 
+/*
+ * The @error is not intended to be user-facing, and is there for
+ * testing/debugging.
+ */
+static gboolean
+flatpak_instance_gc_per_app_dirs (const char *instance_id,
+                                  GError **error)
+{
+  g_autofree char *per_instance_parent = NULL;
+  g_autofree char *per_app_parent = NULL;
+  g_autofree char *app_id = NULL;
+  g_autofree char *instance_dir = NULL;
+  g_autofree char *per_app_dir = NULL;
+  glnx_autofd int per_app_dir_fd = -1;
+  glnx_autofd int per_app_dir_lock_fd = -1;
+  g_autoptr(GError) local_error = NULL;
+  g_autoptr(GKeyFile) key_file = NULL;
+  struct flock exclusive_lock =
+  {
+    .l_type = F_WRLCK,
+    .l_whence = SEEK_SET,
+    .l_start = 0,
+    .l_len = 0,
+  };
+  struct stat statbuf;
+
+  per_instance_parent = flatpak_instance_get_instances_directory ();
+  per_app_parent = flatpak_instance_get_apps_directory ();
+
+  instance_dir = g_build_filename (per_instance_parent, instance_id, NULL);
+  key_file = get_instance_info (instance_dir);
+
+  if (key_file == NULL)
+    return glnx_throw (error, "Unable to load keyfile %s/info", instance_dir);
+
+  if (g_key_file_has_group (key_file, FLATPAK_METADATA_GROUP_APPLICATION))
+    app_id = g_key_file_get_string (key_file,
+                                    FLATPAK_METADATA_GROUP_APPLICATION,
+                                    FLATPAK_METADATA_KEY_NAME, error);
+  else
+    app_id = g_key_file_get_string (key_file,
+                                    FLATPAK_METADATA_GROUP_RUNTIME,
+                                    FLATPAK_METADATA_KEY_RUNTIME, error);
+
+  if (app_id == NULL)
+    {
+      g_prefix_error (error, "%s/info: ", instance_dir);
+      return FALSE;
+    }
+
+  /* Lock the per-app directory so we don't race with other instances */
+  per_app_dir = g_build_filename (per_app_parent, app_id, NULL);
+  per_app_dir_fd = openat (AT_FDCWD, per_app_dir,
+                           O_PATH | O_DIRECTORY | O_CLOEXEC);
+
+  if (per_app_dir_fd < 0)
+    return glnx_throw_errno_prefix (error, "open %s", per_app_dir);
+
+  per_app_dir_lock_fd = openat (per_app_dir_fd, "xdg-run/.ref",
+                                O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+
+  if (per_app_dir_lock_fd < 0)
+    return glnx_throw_errno_prefix (error, "open %s/xdg-run/.ref", per_app_dir);
+
+  /* We don't wait for the lock: we're just doing GC opportunistically.
+   * If at least one instance is running, then we'll fail to get the
+   * exclusive lock. */
+  if (fcntl (per_app_dir_lock_fd, F_SETLK, &exclusive_lock) < 0)
+    return glnx_throw_errno_prefix (error, "lock %s/xdg-run/.ref", per_app_dir);
+
+  if (fstat (per_app_dir_lock_fd, &statbuf) < 0)
+    return glnx_throw_errno_prefix (error, "fstat %s/xdg-run/.ref", per_app_dir);
+
+  /* Only gc if created at least 3 secs ago, to work around the equivalent
+   * of the race mentioned in flatpak_instance_allocate_id() */
+  if (statbuf.st_mtime + 3 >= time (NULL))
+    return glnx_throw (error, "lock file too recent, avoiding race condition");
+
+  /* Clean up the app's /tmp, which could contain relatively large files */
+  if (!glnx_shutil_rm_rf_at (per_app_dir_fd, "tmp", NULL, &local_error))
+    g_debug ("Unable to clean up %s/tmp: %s", per_app_dir, local_error->message);
+
+  /* Deliberately don't clean up xdg-run/ which could reasonably be
+   * expected to persist until the user has logged out from all sessions. */
+
+  return TRUE;
+}
+
 void
 flatpak_instance_iterate_all_and_gc (GPtrArray *out_instances)
 {
@@ -690,6 +778,7 @@ flatpak_instance_iterate_all_and_gc (GPtrArray *out_instances)
             {
               /* The instance is not used, remove it */
               g_debug ("Cleaning up unused container id %s", dent->d_name);
+              flatpak_instance_gc_per_app_dirs (dent->d_name, NULL);
               glnx_shutil_rm_rf_at (iter.fd, dent->d_name, NULL, NULL);
               continue;
             }

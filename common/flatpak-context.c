@@ -78,6 +78,8 @@ const char *flatpak_context_features[] = {
   "multiarch",
   "bluetooth",
   "canbus",
+  "per-app-dev-shm",
+  "per-app-tmp",
   NULL
 };
 
@@ -2064,6 +2066,12 @@ gboolean
 flatpak_context_adds_permissions (FlatpakContext *old,
                                   FlatpakContext *new)
 {
+  /* We allow upgrade to multiarch, that is really not a huge problem.
+   * Similarly, having sensible semantics for /dev/shm and /tmp is
+   * not a security concern. */
+  guint32 harmless_features = (FLATPAK_CONTEXT_FEATURE_MULTIARCH |
+                               FLATPAK_CONTEXT_FEATURE_PER_APP_DEV_SHM |
+                               FLATPAK_CONTEXT_FEATURE_PER_APP_TMP);
   guint32 old_sockets;
 
   if (adds_flags (old->shares & old->shares_valid,
@@ -2085,8 +2093,7 @@ flatpak_context_adds_permissions (FlatpakContext *old,
                   new->devices & new->devices_valid))
     return TRUE;
 
-  /* We allow upgrade to multiarch, that is really not a huge problem */
-  if (adds_flags ((old->features & old->features_valid) | FLATPAK_CONTEXT_FEATURE_MULTIARCH,
+  if (adds_flags ((old->features & old->features_valid) | harmless_features,
                   new->features & new->features_valid))
     return TRUE;
 

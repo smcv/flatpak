@@ -1350,7 +1350,6 @@ flatpak_run_add_environment_args (FlatpakBwrap    *bwrap,
   gboolean has_wayland = FALSE;
   gboolean allow_x11 = FALSE;
   gboolean home_access = FALSE;
-  gboolean sandboxed = (flags & FLATPAK_RUN_FLAG_SANDBOX) != 0;
 
   if ((context->shares & FLATPAK_CONTEXT_SHARED_IPC) == 0)
     {
@@ -1378,7 +1377,8 @@ flatpak_run_add_environment_args (FlatpakBwrap    *bwrap,
                * shared /dev. The host and all sandboxes and subsandboxes
                * all share /dev/shm */
             }
-          else if (!sandboxed && per_app_dir_lock_fd >= 0)
+          else if ((context->features & FLATPAK_CONTEXT_FEATURE_PER_APP_DEV_SHM)
+                   && per_app_dir_lock_fd >= 0)
             {
               glnx_autofd int dev_shm_lock_fd = -1;
               g_autofree char *shared_dev_shm = NULL;
@@ -1425,7 +1425,8 @@ flatpak_run_add_environment_args (FlatpakBwrap    *bwrap,
                                           "--bind", "/run/shm", "/run/shm",
                                           NULL);
                 }
-              else if (!sandboxed && per_app_dir_lock_fd >= 0)
+              else if ((context->features & FLATPAK_CONTEXT_FEATURE_PER_APP_DEV_SHM)
+                       && per_app_dir_lock_fd >= 0)
                 {
                   glnx_autofd int dev_shm_lock_fd = -1;
                   g_autofree char *shared_dev_shm = NULL;
@@ -1513,7 +1514,8 @@ flatpak_run_add_environment_args (FlatpakBwrap    *bwrap,
           if (real_dev_shm != NULL)
               flatpak_bwrap_add_args (bwrap, "--bind", real_dev_shm, "/dev/shm", NULL);
         }
-      else if (!sandboxed && per_app_dir_lock_fd >= 0)
+      else if ((context->features & FLATPAK_CONTEXT_FEATURE_PER_APP_DEV_SHM)
+               && per_app_dir_lock_fd >= 0)
         {
           glnx_autofd int dev_shm_lock_fd = -1;
           g_autofree char *shared_dev_shm = NULL;
@@ -1544,7 +1546,8 @@ flatpak_run_add_environment_args (FlatpakBwrap    *bwrap,
        * going to share /tmp with the host, so by transitivity they will
        * also share it with each other, and with all other instances. */
     }
-  else if (!sandboxed && per_app_dir_lock_fd >= 0)
+  else if ((context->features & FLATPAK_CONTEXT_FEATURE_PER_APP_TMP)
+           && per_app_dir_lock_fd >= 0)
     {
       g_autofree char *shared_tmp = NULL;
 

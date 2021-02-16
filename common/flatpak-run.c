@@ -1372,10 +1372,43 @@ flatpak_run_add_environment_args (FlatpakBwrap    *bwrap,
       /* Don't expose the host /dev/shm, just the device nodes, unless explicitly allowed */
       if (g_file_test ("/dev/shm", G_FILE_TEST_IS_DIR))
         {
-          if ((context->devices & FLATPAK_CONTEXT_DEVICE_SHM) == 0)
-            flatpak_bwrap_add_args (bwrap,
-                                    "--tmpfs", "/dev/shm",
-                                    NULL);
+          if (context->devices & FLATPAK_CONTEXT_DEVICE_SHM)
+            {
+              /* Don't do anything special: include shm in the
+               * shared /dev. The host and all sandboxes and subsandboxes
+               * all share /dev/shm */
+            }
+          else if (!sandboxed && per_app_dir_lock_fd >= 0)
+            {
+              glnx_autofd int dev_shm_lock_fd = -1;
+              g_autofree char *shared_dev_shm = NULL;
+
+              /* The host and the original sandbox have separate /dev/shm,
+               * but we want other instances to be able to share /dev/shm with
+               * the first sandbox (except for subsandboxes run with
+               * flatpak-spawn --sandbox, which will have their own). */
+              if (!flatpak_instance_ensure_per_app_dev_shm (app_id,
+                                                            per_app_dir_lock_fd,
+                                                            &dev_shm_lock_fd,
+                                                            &shared_dev_shm,
+                                                            error))
+                return FALSE;
+
+              /* Hold the lock until we execute bwrap */
+              flatpak_bwrap_add_fd (bwrap, glnx_steal_fd (&dev_shm_lock_fd));
+              flatpak_bwrap_add_args (bwrap,
+                                      "--bind", shared_dev_shm, "/dev/shm",
+                                      "--lock-file", "/dev/shm/.flatpak-tmpdir",
+                                      NULL);
+            }
+          else
+            {
+              /* The host, the original sandbox and each subsandbox
+               * each have a separate /dev/shm. */
+              flatpak_bwrap_add_args (bwrap,
+                                      "--tmpfs", "/dev/shm",
+                                      NULL);
+            }
         }
       else if (g_file_test ("/dev/shm", G_FILE_TEST_IS_SYMLINK))
         {
@@ -1387,13 +1420,38 @@ flatpak_run_add_environment_args (FlatpakBwrap    *bwrap,
             {
               if (context->devices & FLATPAK_CONTEXT_DEVICE_SHM &&
                   g_file_test ("/run/shm", G_FILE_TEST_IS_DIR))
-                flatpak_bwrap_add_args (bwrap,
-                                        "--bind", "/run/shm", "/run/shm",
-                                        NULL);
+                {
+                  flatpak_bwrap_add_args (bwrap,
+                                          "--bind", "/run/shm", "/run/shm",
+                                          NULL);
+                }
+              else if (!sandboxed && per_app_dir_lock_fd >= 0)
+                {
+                  glnx_autofd int dev_shm_lock_fd = -1;
+                  g_autofree char *shared_dev_shm = NULL;
+
+                  /* The host and the original sandbox have separate /dev/shm,
+                   * but we want other instances to be able to share /dev/shm,
+                   * except for flatpak-spawn --subsandbox. */
+                  if (!flatpak_instance_ensure_per_app_dev_shm (app_id,
+                                                                per_app_dir_lock_fd,
+                                                                &dev_shm_lock_fd,
+                                                                &shared_dev_shm,
+                                                                error))
+                    return FALSE;
+
+                  flatpak_bwrap_add_fd (bwrap, glnx_steal_fd (&dev_shm_lock_fd));
+                  flatpak_bwrap_add_args (bwrap,
+                                          "--bind", shared_dev_shm, "/run/shm",
+                                          "--lock-file", "/run/shm/.flatpak-tmpdir",
+                                          NULL);
+                }
               else
-                flatpak_bwrap_add_args (bwrap,
-                                        "--dir", "/run/shm",
-                                        NULL);
+                {
+                  flatpak_bwrap_add_args (bwrap,
+                                          "--dir", "/run/shm",
+                                          NULL);
+                }
             }
           else
             g_warning ("Unexpected /dev/shm symlink %s", link);
@@ -1455,8 +1513,25 @@ flatpak_run_add_environment_args (FlatpakBwrap    *bwrap,
           if (real_dev_shm != NULL)
               flatpak_bwrap_add_args (bwrap, "--bind", real_dev_shm, "/dev/shm", NULL);
         }
-    }
+      else if (!sandboxed && per_app_dir_lock_fd >= 0)
+        {
+          glnx_autofd int dev_shm_lock_fd = -1;
+          g_autofree char *shared_dev_shm = NULL;
 
+          if (!flatpak_instance_ensure_per_app_dev_shm (app_id,
+                                                        per_app_dir_lock_fd,
+                                                        &dev_shm_lock_fd,
+                                                        &shared_dev_shm,
+                                                        error))
+            return FALSE;
+
+          flatpak_bwrap_add_fd (bwrap, glnx_steal_fd (&dev_shm_lock_fd));
+          flatpak_bwrap_add_args (bwrap,
+                                  "--bind", shared_dev_shm, "/dev/shm",
+                                  "--lock-file", "/dev/shm/.flatpak-tmpdir",
+                                  NULL);
+        }
+    }
 
   exports = flatpak_context_get_exports_full (context,
                                               app_id_dir, previous_app_id_dirs,

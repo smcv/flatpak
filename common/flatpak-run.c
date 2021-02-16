@@ -1326,6 +1326,10 @@ flatpak_run_add_extension_args (FlatpakBwrap      *bwrap,
   return TRUE;
 }
 
+/*
+ * @per_app_dir_lock_fd: If >= 0, make use of per-app directories in
+ *  the host's XDG_RUNTIME_DIR to share /tmp between instances.
+ */
 gboolean
 flatpak_run_add_environment_args (FlatpakBwrap    *bwrap,
                                   const char      *app_info_path,
@@ -1334,6 +1338,7 @@ flatpak_run_add_environment_args (FlatpakBwrap    *bwrap,
                                   FlatpakContext  *context,
                                   GFile           *app_id_dir,
                                   GPtrArray       *previous_app_id_dirs,
+                                  int              per_app_dir_lock_fd,
                                   FlatpakExports **exports_out,
                                   GCancellable    *cancellable,
                                   GError         **error)
@@ -1345,6 +1350,7 @@ flatpak_run_add_environment_args (FlatpakBwrap    *bwrap,
   gboolean has_wayland = FALSE;
   gboolean allow_x11 = FALSE;
   gboolean home_access = FALSE;
+  gboolean sandboxed = (flags & FLATPAK_RUN_FLAG_SANDBOX) != 0;
 
   if ((context->shares & FLATPAK_CONTEXT_SHARED_IPC) == 0)
     {
@@ -1456,6 +1462,41 @@ flatpak_run_add_environment_args (FlatpakBwrap    *bwrap,
                                               app_id_dir, previous_app_id_dirs,
                                               TRUE, TRUE,
                                               xdg_dirs_conf, &home_access);
+
+  if (flatpak_exports_path_is_visible (exports, "/tmp"))
+    {
+      /* The original sandbox and any subsandboxes are both already
+       * going to share /tmp with the host, so by transitivity they will
+       * also share it with each other, and with all other instances. */
+    }
+  else if (!sandboxed && per_app_dir_lock_fd >= 0)
+    {
+      g_autofree char *shared_tmp = NULL;
+
+      /* The host and the original sandbox have separate /tmp,
+       * but we want other instances to be able to share /tmp with the
+       * first sandbox, unless they were created by
+       * flatpak-spawn --sandbox. Create it in
+       * ${per_app_parent}/${app_id}/tmp to maximize the chance that it's
+       * on a tmpfs.
+       *
+       * We're relying here on flatpak_run_add_xdg_runtime_dir_args() having
+       * already taken the lock on ${per_app_parent}/${app_id}/xdg-run/.ref
+       * that represents ${per_app_parent}/${app_id} being in use, so we
+       * don't create a separate lock file.
+       *
+       * In apply_extra and flatpak build, we just don't bother to do this. */
+      if (!flatpak_instance_ensure_per_app_tmp (app_id,
+                                                per_app_dir_lock_fd,
+                                                &shared_tmp,
+                                                error))
+        return FALSE;
+
+      flatpak_bwrap_add_args (bwrap,
+                              "--bind", shared_tmp, "/tmp",
+                              NULL);
+    }
+
   flatpak_context_append_bwrap_filesystem (context, bwrap, app_id, app_id_dir,
                                            exports, xdg_dirs_conf, home_access);
 
@@ -2270,12 +2311,15 @@ static gboolean
 flatpak_run_add_xdg_runtime_dir_args (FlatpakBwrap *bwrap,
                                       const char *app_id,
                                       FlatpakRunFlags flags,
+                                      int *lock_fd_out,
                                       GError **error)
 {
   gboolean sandboxed = (flags & FLATPAK_RUN_FLAG_SANDBOX) != 0;
 
   g_return_val_if_fail (bwrap != NULL, FALSE);
   g_return_val_if_fail (app_id != NULL, FALSE);
+  g_return_val_if_fail (lock_fd_out != NULL, FALSE);
+  g_return_val_if_fail (*lock_fd_out == -1, FALSE);
   g_return_val_if_fail (error == NULL || *error == NULL, FALSE);
 
   /* The host and the original instance always have separate instances of
@@ -2306,9 +2350,6 @@ flatpak_run_add_xdg_runtime_dir_args (FlatpakBwrap *bwrap,
         g_warning ("Unable to create symlink at %s: %s",
                    old_flatpak_info, g_strerror (errno));
 
-      /* Hold onto the lock until we execute bwrap */
-      flatpak_bwrap_add_fd (bwrap, glnx_steal_fd (&lock_fd));
-
       /* Use the xdg-run subdirectory of the per-app directory as this app's
        * XDG_RUNTIME_DIR, shared between instances */
       flatpak_bwrap_add_arg (bwrap, "--bind");
@@ -2318,6 +2359,8 @@ flatpak_run_add_xdg_runtime_dir_args (FlatpakBwrap *bwrap,
       /* Tell bwrap to keep holding onto the lock on our behalf */
       flatpak_bwrap_add_arg (bwrap, "--lock-file");
       flatpak_bwrap_add_arg_printf (bwrap, "/run/user/%d/.ref", getuid ());
+
+      *lock_fd_out = glnx_steal_fd (&lock_fd);
     }
   else
     {
@@ -3727,6 +3770,7 @@ flatpak_run_app (FlatpakDecomposed *app_ref,
   gboolean parent_expose_pids = (flags & FLATPAK_RUN_FLAG_PARENT_EXPOSE_PIDS) != 0;
   gboolean parent_share_pids = (flags & FLATPAK_RUN_FLAG_PARENT_SHARE_PIDS) != 0;
   struct stat s;
+  glnx_autofd int per_app_dir_lock_fd = -1;
 
   if (!check_sudo (error))
     return FALSE;
@@ -3991,7 +4035,8 @@ flatpak_run_app (FlatpakDecomposed *app_ref,
   /* We have to set this up before we start mounting things into the
    * XDG_RUNTIME_DIR in flatpak_run_setup_base_argv() and
    * flatpak_run_add_app_info_args(), because otherwise it would shadow them. */
-  if (!flatpak_run_add_xdg_runtime_dir_args (bwrap, app_id, flags, error))
+  if (!flatpak_run_add_xdg_runtime_dir_args (bwrap, app_id, flags,
+                                             &per_app_dir_lock_fd, error))
     return FALSE;
 
   if (!flatpak_run_setup_base_argv (bwrap, runtime_files, app_id_dir, app_arch, flags, error))
@@ -4029,8 +4074,12 @@ flatpak_run_app (FlatpakDecomposed *app_ref,
 
   if (!flatpak_run_add_environment_args (bwrap, app_info_path, flags,
                                          app_id, app_context, app_id_dir, previous_app_id_dirs,
+                                         per_app_dir_lock_fd,
                                          &exports, cancellable, error))
     return FALSE;
+
+  /* Hold onto the lock until we execute bwrap */
+  flatpak_bwrap_add_fd (bwrap, glnx_steal_fd (&per_app_dir_lock_fd));
 
   if ((app_context->shares & FLATPAK_CONTEXT_SHARED_NETWORK) != 0)
     flatpak_run_add_resolved_args (bwrap);

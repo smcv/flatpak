@@ -593,6 +593,7 @@ GList *flatpak_list_extensions (GKeyFile   *metakey,
                                 const char *arch,
                                 const char *branch);
 
+gboolean flatpak_argument_needs_quoting (const char *arg);
 char * flatpak_quote_argv (const char *argv[],
                            gssize      len);
 gboolean flatpak_file_arg_has_suffix (const char *arg,
@@ -901,6 +902,11 @@ null_safe_g_ptr_array_unref (gpointer data)
 {
   g_clear_pointer (&data, g_ptr_array_unref);
 }
+
+gboolean flatpak_str_is_integer (const char *s);
+
+int flatpak_envp_cmp (const void *p1,
+                      const void *p2);
 
 #define FLATPAK_MESSAGE_ID "c7b39b1e006b464599465e105b361485"
 

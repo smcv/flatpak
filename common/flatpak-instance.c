@@ -20,11 +20,17 @@
 
 #include "config.h"
 
+#include <fcntl.h>
+#include <unistd.h>
+
+#include "flatpak-utils-base-private.h"
 #include "flatpak-utils-private.h"
 #include "flatpak-run-private.h"
 #include "flatpak-instance.h"
 #include "flatpak-instance-private.h"
 #include "flatpak-enum-types.h"
+
+#include <glib/gi18n-lib.h>
 
 /**
  * SECTION:flatpak-instance
@@ -420,20 +426,641 @@ flatpak_instance_new (const char *dir)
   return self;
 }
 
+/*
+ * Return the directory in which we create a numbered subdirectory per
+ * instance.
+ *
+ * This directory is not shared with Flatpak apps, and we rely on this
+ * for the sandbox boundary.
+ *
+ * This is currently the same as the
+ * flatpak_instance_get_apps_directory(). We can distinguish between
+ * instance IDs and app-IDs because instances are integers, and app-IDs
+ * always contain at least one dot.
+ */
+char *
+flatpak_instance_get_instances_directory (void)
+{
+  g_autofree char *user_runtime_dir = flatpak_get_real_xdg_runtime_dir ();
+
+  return g_build_filename (user_runtime_dir, ".flatpak", NULL);
+}
+
+/*
+ * Return the directory in which we create a subdirectory per
+ * concurrently running Flatpak app-ID to store app-specific data that
+ * is common to all instances of the same app.
+ *
+ * This directory is not shared with Flatpak apps, and we rely on this
+ * for the sandbox boundary.
+ *
+ * This is currently the same as the
+ * flatpak_instance_get_instances_directory(). We can distinguish between
+ * instance IDs and app-IDs because instances are integers, and app-IDs
+ * always contain at least one dot.
+ */
+char *
+flatpak_instance_get_apps_directory (void)
+{
+  return flatpak_instance_get_instances_directory ();
+}
+
+/*
+ * @app_id: $FLATPAK_ID
+ * @per_app_dir_lock_fd: Used to prove that we have already taken out
+ *  a per-app non-exclusive lock to stop this directory from being
+ *  garbage-collected
+ * @lock_fd_out: (out) (not optional): Used to return an open fd
+ *  for the .flatpak-tmp lock file
+ * @shared_tmp: (out) (not optional): Used to return the path to the
+ *  shared /dev/shm
+ *
+ * Create the per-app /dev/shm.
+ */
+gboolean
+flatpak_instance_ensure_per_app_dev_shm (const char *app_id,
+                                         int per_app_dir_lock_fd,
+                                         int *lock_fd_out,
+                                         char **shared_dev_shm_out,
+                                         GError **error)
+{
+  /* This function is actually generic, since we might well want to
+   * offload other directories in the same way - but the only directory
+   * we do this for right now is /dev/shm. */
+  static const char link_name[] = "dev-shm";
+  static const char parent[] = "/dev/shm";
+  g_autofree gchar *lock = NULL;
+  g_autofree gchar *path = NULL;
+  g_autofree gchar *per_app_parent = NULL;
+  g_autofree gchar *per_app_dir = NULL;
+  glnx_autofd int per_app_dir_fd = -1;
+  glnx_autofd int lock_fd = -1;
+  struct flock non_exclusive_lock =
+  {
+    .l_type = F_RDLCK,
+    .l_whence = SEEK_SET,
+    .l_start = 0,
+    .l_len = 0,
+  };
+
+  g_return_val_if_fail (app_id != NULL, FALSE);
+  g_return_val_if_fail (per_app_dir_lock_fd >= 0, FALSE);
+  g_return_val_if_fail (lock_fd_out != NULL, FALSE);
+  g_return_val_if_fail (*lock_fd_out == -1, FALSE);
+  g_return_val_if_fail (shared_dev_shm_out != NULL, FALSE);
+  g_return_val_if_fail (*shared_dev_shm_out == NULL, FALSE);
+  g_return_val_if_fail (error == NULL || *error == NULL, FALSE);
+
+  per_app_parent = flatpak_instance_get_apps_directory ();
+
+  per_app_dir = g_build_filename (per_app_parent, app_id, NULL);
+  per_app_dir_fd = openat (AT_FDCWD, per_app_dir,
+                           O_PATH | O_DIRECTORY | O_CLOEXEC);
+
+  /* This can't happen under normal circumstances: if we have the lock,
+   * then the directory it's in had better exist. */
+  if (per_app_dir_fd < 0)
+    return glnx_throw_errno_prefix (error,
+                                    _("Unable to open directory %s"),
+                                    per_app_dir);
+
+  /* If there's an existing symlink to a suitable directory, we can
+   * reuse it (carefully). This gives us the sharing we wanted between
+   * multiple instances of the same app, and between app and subsandbox. */
+  if (flatpak_instance_claim_per_app_temp_directory (app_id,
+                                                     per_app_dir_fd,
+                                                     link_name,
+                                                     parent,
+                                                     F_RDLCK,
+                                                     &lock_fd,
+                                                     &path,
+                                                     NULL))
+    {
+      *lock_fd_out = glnx_steal_fd (&lock_fd);
+      *shared_dev_shm_out = g_steal_pointer (&path);
+      return TRUE;
+    }
+
+  /* Otherwise create a new directory in @parent, and make @link_name
+   * a symlink to it. */
+
+  /* /dev/shm/flatpak-$FLATPAK_ID-XXXXXX */
+  path = g_strdup_printf ("%s/flatpak-%s-XXXXXX", parent, app_id);
+
+  if (g_mkdtemp (path) == NULL)
+    return glnx_throw_errno_prefix (error,
+                                    _("Unable to create temporary directory in %s"),
+                                    parent);
+
+  /* This has a dual purpose: it's the lock file, and it also marks
+   * this directory as an expendable temp directory. (Inspired by the
+   * use of .testtmp in libostree) */
+  lock = g_build_filename (path, ".flatpak-tmpdir", NULL);
+  lock_fd = openat (AT_FDCWD, lock, O_RDONLY | O_CREAT | O_CLOEXEC,
+                    0600);
+
+  if (lock_fd < 0)
+    return glnx_throw_errno_prefix (error,
+                                    _("Unable to lock directory %s"),
+                                    path);
+
+  /* Take a read lock so nobody cleans it up */
+  if (fcntl (lock_fd, F_SETLK, &non_exclusive_lock) < 0)
+    return glnx_throw_errno_prefix (error,
+                                    _("Unable to lock directory %s"),
+                                    path);
+
+  /* Replace the symlink */
+  if ((unlinkat (per_app_dir_fd, link_name, 0) < 0 && errno != ENOENT) ||
+      symlinkat (path, per_app_dir_fd, link_name) < 0)
+    return glnx_throw_errno_prefix (error,
+                                    _("Unable to update symbolic link %s/%s"),
+                                    per_app_dir, link_name);
+
+  *lock_fd_out = glnx_steal_fd (&lock_fd);
+  *shared_dev_shm_out = g_steal_pointer (&path);
+  return TRUE;
+}
+
+/*
+ * @app_id: $FLATPAK_ID
+ * @per_app_dir_lock_fd: Used to prove that we have already taken out
+ *  a per-app non-exclusive lock to stop this directory from being
+ *  garbage-collected
+ * @shared_tmp: (out) (not optional): Used to return the path to the
+ *  shared /tmp
+ *
+ * Create the per-app /tmp.
+ */
+gboolean
+flatpak_instance_ensure_per_app_tmp (const char *app_id,
+                                     int per_app_dir_lock_fd,
+                                     char **shared_tmp_out,
+                                     GError **error)
+{
+  g_autofree char *per_app_parent = NULL;
+  g_autofree char *shared_tmp = NULL;
+
+  g_return_val_if_fail (app_id != NULL, FALSE);
+  g_return_val_if_fail (shared_tmp_out != NULL, FALSE);
+  g_return_val_if_fail (*shared_tmp_out == NULL, FALSE);
+  g_return_val_if_fail (error == NULL || *error == NULL, FALSE);
+
+  /* We don't actually do anything with this, we just pass it in here as
+   * proof that we already set up the per-app XDG_RUNTIME_DIR that
+   * contains the lock file for per-app things, to force us to get the
+   * sequence right */
+  g_return_val_if_fail (per_app_dir_lock_fd >= 0, FALSE);
+
+  per_app_parent = flatpak_instance_get_apps_directory ();
+  shared_tmp = g_build_filename (per_app_parent, app_id, "tmp", NULL);
+
+  if (g_mkdir_with_parents (shared_tmp, 0700) != 0)
+    return glnx_throw_errno_prefix (error,
+                                    _("Unable to create directory %s"),
+                                    shared_tmp);
+
+  *shared_tmp_out = g_steal_pointer (&shared_tmp);
+  return TRUE;
+}
+
+/*
+ * @app_id: $FLATPAK_ID
+ * @lock_fd: (out) (not optional): Used to return a lock on the
+ *  per-app directories
+ * @shared_xrd: (out) (not optional): Used to return the path to the
+ *  shared XDG_RUNTIME_DIR
+ *
+ * Create the per-app XDG_RUNTIME_DIR, and take out a non-exclusive lock
+ * XDG_RUNTIME_DIR/.ref.
+ */
+gboolean
+flatpak_instance_ensure_per_app_xdg_runtime_dir (const char *app_id,
+                                                 int *lock_fd_out,
+                                                 char **shared_xrd_out,
+                                                 GError **error)
+{
+  glnx_autofd int lock_fd = -1;
+  g_autofree char *lock_path = NULL;
+  g_autofree char *per_app_parent = NULL;
+  g_autofree char *shared_xrd = NULL;
+  struct flock non_exclusive_lock =
+  {
+    .l_type = F_RDLCK,
+    .l_whence = SEEK_SET,
+    .l_start = 0,
+    .l_len = 0
+  };
+
+  g_return_val_if_fail (app_id != NULL, FALSE);
+  g_return_val_if_fail (lock_fd_out != NULL, FALSE);
+  g_return_val_if_fail (*lock_fd_out == -1, FALSE);
+  g_return_val_if_fail (shared_xrd_out != NULL, FALSE);
+  g_return_val_if_fail (*shared_xrd_out == NULL, FALSE);
+  g_return_val_if_fail (error == NULL || *error == NULL, FALSE);
+
+  per_app_parent = flatpak_instance_get_apps_directory ();
+  shared_xrd = g_build_filename (per_app_parent, app_id, "xdg-run", NULL);
+  lock_path = g_build_filename (shared_xrd, ".ref", NULL);
+
+  if (g_mkdir_with_parents (shared_xrd, 0700) != 0)
+    return glnx_throw_errno_prefix (error,
+                                    _("Unable to create directory %s"),
+                                    shared_xrd);
+
+  /* Take a file lock inside the per-app directory, and hold it during
+   * setup and in bwrap. Anyone trying to clean up unused subdirectories
+   * must first verify that there is an xdg-run/.ref file and take a write
+   * lock on it to ensure the directory is not in use.
+   *
+   * The lock file needs to be something that the app can hold open,
+   * and we might as well use one in the XDG_RUNTIME_DIR, on the
+   * assumption that any other directories we might want to create on a
+   * per-app-ID basis (such as /tmp or /dev/shm) will have a lifetime
+   * no longer than the lifetime of the XDG_RUNTIME_DIR. */
+  lock_fd = open (lock_path, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+
+  /* As with the per-instance directories, there's a race here, because
+   * we can't atomically open and lock the lockfile. We work around
+   * that by only doing GC if the lockfile is "old". */
+  if (lock_fd < 0 ||
+      fcntl (lock_fd, F_SETLK, &non_exclusive_lock) != 0)
+    return glnx_throw_errno_prefix (error,
+                                    _("Unable to lock %s"),
+                                    lock_path);
+
+  *lock_fd_out = glnx_steal_fd (&lock_fd);
+  *shared_xrd_out = g_steal_pointer (&shared_xrd);
+  return TRUE;
+}
+
+/*
+ * @host_dir_out: (not optional): used to return the directory on the host
+ *  system representing this instance
+ * @lock_fd_out: (not optional): used to return a non-exclusive (read) lock
+ *  on the lockdirectory on the host-file
+ */
+char *
+flatpak_instance_allocate_id (char **host_dir_out,
+                              int *lock_fd_out)
+{
+  g_autofree char *base_dir = flatpak_instance_get_instances_directory ();
+  int count;
+
+  g_return_val_if_fail (host_dir_out != NULL, NULL);
+  g_return_val_if_fail (*host_dir_out == NULL, NULL);
+  g_return_val_if_fail (lock_fd_out != NULL, NULL);
+  g_return_val_if_fail (*lock_fd_out == -1, NULL);
+
+  g_mkdir_with_parents (base_dir, 0755);
+
+  flatpak_instance_iterate_all_and_gc (NULL);
+
+  for (count = 0; count < 1000; count++)
+    {
+      g_autofree char *instance_id = NULL;
+      g_autofree char *instance_dir = NULL;
+
+      instance_id = g_strdup_printf ("%u", g_random_int ());
+
+      instance_dir = g_build_filename (base_dir, instance_id, NULL);
+
+      /* We use an atomic mkdir to ensure the instance id is unique */
+      if (mkdir (instance_dir, 0755) == 0)
+        {
+          g_autofree char *lock_file = g_build_filename (instance_dir, ".ref", NULL);
+          glnx_autofd int lock_fd = -1;
+          struct flock l = {
+            .l_type = F_RDLCK,
+            .l_whence = SEEK_SET,
+            .l_start = 0,
+            .l_len = 0
+          };
+
+          /* Then we take a file lock inside the dir, hold that during
+           * setup and in bwrap. Anyone trying to clean up unused
+           * directories need to first verify that there is a .ref
+           * file and take a write lock on .ref to ensure its not in
+           * use. */
+          lock_fd = open (lock_file, O_RDWR | O_CREAT | O_CLOEXEC, 0644);
+          /* There is a tiny race here between the open creating the file and the lock succeeding.
+             We work around that by only gc:ing "old" .ref files */
+          if (lock_fd != -1 && fcntl (lock_fd, F_SETLK, &l) == 0)
+            {
+              *lock_fd_out = glnx_steal_fd (&lock_fd);
+              g_debug ("Allocated instance id %s", instance_id);
+              *host_dir_out = g_steal_pointer (&instance_dir);
+              return g_steal_pointer (&instance_id);
+            }
+        }
+    }
+
+  return NULL;
+}
+
 FlatpakInstance *
 flatpak_instance_new_for_id (const char *id)
 {
+  g_autofree char *base_dir = flatpak_instance_get_instances_directory ();
   g_autofree char *dir = NULL;
 
-  dir = g_build_filename (g_get_user_runtime_dir (), ".flatpak", id, NULL);
+  dir = g_build_filename (base_dir, id, NULL);
   return flatpak_instance_new (dir);
+}
+
+/*
+ * flatpak_instance_claim_per_app_temp_directory:
+ * @app_id: $FLATPAK_ID
+ * @link_path: Path of a symbolic link to a subdirectory of @parent
+ * @parent: The directory in which we created the temporary directory,
+ *  such as /dev/shm or /tmp
+ * @locking_mode: F_RDLCK or F_WRLCK
+ * @lock_fd_out: (out) (not optional): Return a fd that holds a lock
+ *  in @path_out
+ * @path_out: (out) (not optional): Return the path to the directory
+ *  referenced by @link_path
+ *
+ * Try to take control of an existing per-app temporary directory
+ * referenced by @link_path, either for reuse or for deletion.
+ * Return %TRUE if we can.
+ *
+ * This is currently only used for /dev/shm, but it's designed to be
+ * equally usable for other non-user-owned directories like /tmp.
+ *
+ * We have to be careful here, because @link_path might be left over
+ * from a previous boot, and it probably points into a directory like
+ * /dev/shm or /tmp, where an attacker might recreate our directories,
+ * for example as symbolic links to somewhere they control. As a result,
+ * this function is security-sensitive, and needs to follow a policy of
+ * failing when an unexpected situation is detected.
+ *
+ * @error is not normally user-visible, and is mostly present to support
+ * debugging and unit testing.
+ *
+ * Returns: %TRUE if @link_path points to a suitable directory,
+ *  or %FALSE with @error set if it does not.
+ */
+gboolean
+flatpak_instance_claim_per_app_temp_directory (const char *app_id,
+                                               int at_fd,
+                                               const char *link_path,
+                                               const char *parent,
+                                               int locking_mode,
+                                               int *lock_fd_out,
+                                               char **path_out,
+                                               GError **error)
+{
+  g_autofree char *reuse_path = NULL;
+  glnx_autofd int dfd = -1;
+  glnx_autofd int lock_fd = -1;
+  struct stat statbuf;
+  struct flock non_exclusive_lock =
+  {
+    .l_type = locking_mode,
+    .l_whence = SEEK_SET,
+    .l_start = 0,
+    .l_len = 0,
+  };
+  const char *slash;
+  const char *rest;
+
+  at_fd = glnx_dirfd_canonicalize (at_fd);
+
+  g_return_val_if_fail (app_id != NULL, FALSE);
+  g_return_val_if_fail (at_fd == AT_FDCWD || at_fd >= 0, FALSE);
+  g_return_val_if_fail (link_path != NULL, FALSE);
+  g_return_val_if_fail (parent != NULL, FALSE);
+  g_return_val_if_fail (locking_mode == F_RDLCK || locking_mode == F_WRLCK, FALSE);
+  g_return_val_if_fail (lock_fd_out != NULL, FALSE);
+  g_return_val_if_fail (*lock_fd_out == -1, FALSE);
+  g_return_val_if_fail (path_out != NULL, FALSE);
+  g_return_val_if_fail (*path_out == NULL, FALSE);
+  g_return_val_if_fail (error == NULL || *error == NULL, FALSE);
+
+  reuse_path = glnx_readlinkat_malloc (at_fd, link_path, NULL, error);
+
+  if (reuse_path == NULL)
+    return FALSE;
+
+  /* If we're going to use it as /dev/shm, the directory on the
+   * host should match /dev/shm/flatpak-$FLATPAK_ID-XXXXXX */
+  if (!g_str_has_prefix (reuse_path, parent))
+    return glnx_throw (error, "%s does not start with %s",
+                       reuse_path, parent);
+
+  /* /flatpak-$FLATPAK_ID-XXXXXX */
+  slash = reuse_path + strlen (parent);
+
+  if (*slash != '/')
+    return glnx_throw (error, "%s does not start with %s/",
+                       reuse_path, parent);
+
+  /* flatpak-$FLATPAK_ID-XXXXXX */
+  rest = slash + 1;
+
+  if (!g_str_has_prefix (rest, "flatpak-"))
+    return glnx_throw (error, "%s does not start with %s/flatpak-",
+                       reuse_path, parent);
+
+  if (strchr (rest, '/') != NULL)
+    return glnx_throw (error, "%s has too many directory separators",
+                       reuse_path);
+
+  if (!g_str_has_prefix (rest + strlen ("flatpak-"), app_id))
+    return glnx_throw (error, "%s does not start with %s/flatpak-%s",
+                       reuse_path, parent, app_id);
+
+  if (rest[strlen ("flatpak-") + strlen (app_id)] != '-')
+    return glnx_throw (error, "%s does not start with %s/flatpak-%s-",
+                       reuse_path, parent, app_id);
+
+  /* Avoid symlink attacks via O_NOFOLLOW */
+  dfd = openat (AT_FDCWD, reuse_path,
+                O_PATH | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+
+  if (dfd < 0)
+    return glnx_throw_errno_prefix (error, "opening %s O_DIRECTORY|O_NOFOLLOW",
+                                    reuse_path);
+
+  if (fstat (dfd, &statbuf) < 0)
+    return glnx_throw_errno_prefix (error, "fstat %s", reuse_path);
+
+  /* We certainly don't want to reuse someone else's directory */
+  if (statbuf.st_uid != geteuid ())
+    return glnx_throw (error, "%s does not belong to this user", reuse_path);
+
+  lock_fd = openat (dfd, ".flatpak-tmpdir", O_RDONLY | O_CLOEXEC);
+
+  /* If we can't open the lock file, the most likely reason is that it
+   * isn't a directory that we created */
+  if (lock_fd < 0)
+    return glnx_throw_errno_prefix (error, "opening lock file %s/.flatpak-tmpdir",
+                                    reuse_path);
+
+  /* Take a read lock so nobody cleans it up, or a write lock if we want
+   * to clean it up ourselves. Don't wait: if a conflicting lock is held,
+   * we just won't use this directory. */
+  if (fcntl (lock_fd, F_SETLK, &non_exclusive_lock) < 0)
+    return glnx_throw_errno_prefix (error, "cannot lock file %s/.flatpak-tmpdir",
+                                    reuse_path);
+
+  *lock_fd_out = glnx_steal_fd (&lock_fd);
+  *path_out = g_steal_pointer (&reuse_path);
+  return TRUE;
+}
+
+/*
+ * The @error is not intended to be user-facing, and is there for
+ * testing/debugging.
+ */
+static gboolean
+flatpak_instance_gc_per_app_dirs (const char *instance_id,
+                                  GError **error)
+{
+  g_autofree char *per_instance_parent = NULL;
+  g_autofree char *per_app_parent = NULL;
+  g_autofree char *app_id = NULL;
+  g_autofree char *instance_dir = NULL;
+  g_autofree char *per_app_dir = NULL;
+  glnx_autofd int per_app_dir_fd = -1;
+  glnx_autofd int per_app_dir_lock_fd = -1;
+  g_autoptr(GError) local_error = NULL;
+  g_autoptr(GKeyFile) key_file = NULL;
+  struct flock exclusive_lock =
+  {
+    .l_type = F_WRLCK,
+    .l_whence = SEEK_SET,
+    .l_start = 0,
+    .l_len = 0,
+  };
+  struct stat statbuf;
+
+  per_instance_parent = flatpak_instance_get_instances_directory ();
+  per_app_parent = flatpak_instance_get_apps_directory ();
+
+  instance_dir = g_build_filename (per_instance_parent, instance_id, NULL);
+  key_file = get_instance_info (instance_dir);
+
+  if (key_file == NULL)
+    return glnx_throw (error, "Unable to load keyfile %s/info", instance_dir);
+
+  if (g_key_file_has_group (key_file, FLATPAK_METADATA_GROUP_APPLICATION))
+    app_id = g_key_file_get_string (key_file,
+                                    FLATPAK_METADATA_GROUP_APPLICATION,
+                                    FLATPAK_METADATA_KEY_NAME, error);
+  else
+    app_id = g_key_file_get_string (key_file,
+                                    FLATPAK_METADATA_GROUP_RUNTIME,
+                                    FLATPAK_METADATA_KEY_RUNTIME, error);
+
+  if (app_id == NULL)
+    {
+      g_prefix_error (error, "%s/info: ", instance_dir);
+      return FALSE;
+    }
+
+  /* Lock the per-app directory so we don't race with other instances */
+  per_app_dir = g_build_filename (per_app_parent, app_id, NULL);
+  per_app_dir_fd = openat (AT_FDCWD, per_app_dir,
+                           O_PATH | O_DIRECTORY | O_CLOEXEC);
+
+  if (per_app_dir_fd < 0)
+    return glnx_throw_errno_prefix (error, "open %s", per_app_dir);
+
+  per_app_dir_lock_fd = openat (per_app_dir_fd, "xdg-run/.ref",
+                                O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+
+  if (per_app_dir_lock_fd < 0)
+    return glnx_throw_errno_prefix (error, "open %s/xdg-run/.ref", per_app_dir);
+
+  /* We don't wait for the lock: we're just doing GC opportunistically.
+   * If at least one instance is running, then we'll fail to get the
+   * exclusive lock. */
+  if (fcntl (per_app_dir_lock_fd, F_SETLK, &exclusive_lock) < 0)
+    return glnx_throw_errno_prefix (error, "lock %s/xdg-run/.ref", per_app_dir);
+
+  if (fstat (per_app_dir_lock_fd, &statbuf) < 0)
+    return glnx_throw_errno_prefix (error, "fstat %s/xdg-run/.ref", per_app_dir);
+
+  /* Only gc if created at least 3 secs ago, to work around the equivalent
+   * of the race mentioned in flatpak_instance_allocate_id() */
+  if (statbuf.st_mtime + 3 >= time (NULL))
+    return glnx_throw (error, "lock file too recent, avoiding race condition");
+
+  /* /dev/shm is offloaded onto the host's /dev/shm to get consistent
+   * free space behaviour and make sure it's actually in RAM. It could
+   * contain relatively large files, so we clean it up.
+   *
+   * In principle this could be used for other directories such as /tmp,
+   * in a loop over an array of paths (hence this indentation), but we
+   * only do this for /dev/shm right now. */
+  do
+    {
+      g_autofree char *path = NULL;
+      glnx_autofd int lock_fd = -1;
+
+      /* /dev/shm is an attacker-controlled namespace, so we need to be
+       * careful what directories we will delete. We have to assume
+       * that attackers will create malicious symlinks in /dev/shm to
+       * try to trick us into opening or deleting the wrong files. */
+      if (flatpak_instance_claim_per_app_temp_directory (app_id,
+                                                         per_app_dir_fd,
+                                                         "dev-shm",
+                                                         "/dev/shm",
+                                                         F_WRLCK,
+                                                         &lock_fd,
+                                                         &path,
+                                                         &local_error))
+        {
+          g_assert (g_str_has_prefix (path, "/dev/shm/"));
+
+          if (!glnx_shutil_rm_rf_at (AT_FDCWD, path, NULL, &local_error))
+            {
+              g_debug ("Unable to clean up %s: %s",
+                       path, local_error->message);
+              g_clear_error (&local_error);
+            }
+
+          if (unlinkat (per_app_dir_fd, "dev-shm", 0) != 0)
+            g_debug ("Unable to clean up %s/%s: %s",
+                     per_app_dir, "dev-shm", g_strerror (errno));
+        }
+      else if (unlinkat (per_app_dir_fd, "dev-shm", 0) < 0 && errno == ENOENT)
+        {
+          /* ignore, the symlink wasn't even there anyway */
+          g_clear_error (&local_error);
+        }
+      else
+        {
+          g_debug ("%s/%s no longer points to the expected directory and "
+                   "was removed: %s",
+                   per_app_dir, "dev-shm", local_error->message);
+          g_clear_error (&local_error);
+        }
+    }
+  while (0);
+
+  /* We currently allocate the app's /tmp directly in the per-app directory
+   * on the host's XDG_RUNTIME_DIR, instead of offloading it into /tmp,
+   * so we expect tmp to be a directory and not a symlink. If it's a
+   * symlink, we'll just unlink it. */
+  if (!glnx_shutil_rm_rf_at (per_app_dir_fd, "tmp", NULL, &local_error))
+    {
+      g_debug ("Unable to clean up %s/tmp: %s",
+               per_app_dir, local_error->message);
+      g_clear_error (&local_error);
+    }
+
+  /* Deliberately don't clean up xdg-run/ which could reasonably be
+   * expected to persist until the user has logged out from all sessions. */
+
+  return TRUE;
 }
 
 void
 flatpak_instance_iterate_all_and_gc (GPtrArray *out_instances)
 {
-
-  g_autofree char *base_dir = g_build_filename (g_get_user_runtime_dir (), ".flatpak", NULL);
+  g_autofree char *base_dir = flatpak_instance_get_instances_directory ();
   g_auto(GLnxDirFdIterator) iter = { 0 };
   struct dirent *dent;
 
@@ -449,6 +1076,9 @@ flatpak_instance_iterate_all_and_gc (GPtrArray *out_instances)
       if (dent == NULL)
         break;
 
+      if (!flatpak_str_is_integer (dent->d_name))
+        continue;
+
       if (dent->d_type == DT_DIR)
         {
           g_autofree char *ref_file = g_strconcat (dent->d_name, "/.ref", NULL);
@@ -462,13 +1092,15 @@ flatpak_instance_iterate_all_and_gc (GPtrArray *out_instances)
           glnx_autofd int lock_fd = openat (iter.fd, ref_file, O_RDWR | O_CLOEXEC);
           if (lock_fd != -1 &&
               fstat (lock_fd, &statbuf) == 0 &&
-              /* Only gc if created at least 3 secs ago, to work around race mentioned in flatpak_run_allocate_id() */
+              /* Only gc if created at least 3 secs ago, to work around race mentioned in
+               * flatpak_instance_allocate_id() */
               statbuf.st_mtime + 3 < time (NULL) &&
               fcntl (lock_fd, F_GETLK, &l) == 0 &&
               l.l_type == F_UNLCK)
             {
               /* The instance is not used, remove it */
               g_debug ("Cleaning up unused container id %s", dent->d_name);
+              flatpak_instance_gc_per_app_dirs (dent->d_name, NULL);
               glnx_shutil_rm_rf_at (iter.fd, dent->d_name, NULL, NULL);
               continue;
             }

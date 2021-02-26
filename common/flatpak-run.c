@@ -1337,6 +1337,10 @@ flatpak_run_add_extension_args (FlatpakBwrap      *bwrap,
   return TRUE;
 }
 
+/*
+ * @per_app_dir_lock_fd: If >= 0, make use of per-app directories in
+ *  the host's XDG_RUNTIME_DIR to share /tmp between instances.
+ */
 gboolean
 flatpak_run_add_environment_args (FlatpakBwrap    *bwrap,
                                   const char      *app_info_path,
@@ -1345,15 +1349,18 @@ flatpak_run_add_environment_args (FlatpakBwrap    *bwrap,
                                   FlatpakContext  *context,
                                   GFile           *app_id_dir,
                                   GPtrArray       *previous_app_id_dirs,
+                                  int              per_app_dir_lock_fd,
                                   FlatpakExports **exports_out,
                                   GCancellable    *cancellable,
                                   GError         **error)
 {
   g_autoptr(GError) my_error = NULL;
+  g_autoptr(GString) xdg_dirs_conf = g_string_new ("");
   g_autoptr(FlatpakExports) exports = NULL;
   g_autoptr(FlatpakBwrap) proxy_arg_bwrap = flatpak_bwrap_new (flatpak_bwrap_empty_env);
   gboolean has_wayland = FALSE;
   gboolean allow_x11 = FALSE;
+  gboolean home_access = FALSE;
 
   if ((context->shares & FLATPAK_CONTEXT_SHARED_IPC) == 0)
     {
@@ -1375,10 +1382,44 @@ flatpak_run_add_environment_args (FlatpakBwrap    *bwrap,
       /* Don't expose the host /dev/shm, just the device nodes, unless explicitly allowed */
       if (g_file_test ("/dev/shm", G_FILE_TEST_IS_DIR))
         {
-          if ((context->devices & FLATPAK_CONTEXT_DEVICE_SHM) == 0)
-            flatpak_bwrap_add_args (bwrap,
-                                    "--tmpfs", "/dev/shm",
-                                    NULL);
+          if (context->devices & FLATPAK_CONTEXT_DEVICE_SHM)
+            {
+              /* Don't do anything special: include shm in the
+               * shared /dev. The host and all sandboxes and subsandboxes
+               * all share /dev/shm */
+            }
+          else if ((context->features & FLATPAK_CONTEXT_FEATURE_PER_APP_DEV_SHM)
+                   && per_app_dir_lock_fd >= 0)
+            {
+              glnx_autofd int dev_shm_lock_fd = -1;
+              g_autofree char *shared_dev_shm = NULL;
+
+              /* The host and the original sandbox have separate /dev/shm,
+               * but we want other instances to be able to share /dev/shm with
+               * the first sandbox (except for subsandboxes run with
+               * flatpak-spawn --sandbox, which will have their own). */
+              if (!flatpak_instance_ensure_per_app_dev_shm (app_id,
+                                                            per_app_dir_lock_fd,
+                                                            &dev_shm_lock_fd,
+                                                            &shared_dev_shm,
+                                                            error))
+                return FALSE;
+
+              /* Hold the lock until we execute bwrap */
+              flatpak_bwrap_add_fd (bwrap, glnx_steal_fd (&dev_shm_lock_fd));
+              flatpak_bwrap_add_args (bwrap,
+                                      "--bind", shared_dev_shm, "/dev/shm",
+                                      "--lock-file", "/dev/shm/.flatpak-tmpdir",
+                                      NULL);
+            }
+          else
+            {
+              /* The host, the original sandbox and each subsandbox
+               * each have a separate /dev/shm. */
+              flatpak_bwrap_add_args (bwrap,
+                                      "--tmpfs", "/dev/shm",
+                                      NULL);
+            }
         }
       else if (g_file_test ("/dev/shm", G_FILE_TEST_IS_SYMLINK))
         {
@@ -1390,13 +1431,39 @@ flatpak_run_add_environment_args (FlatpakBwrap    *bwrap,
             {
               if (context->devices & FLATPAK_CONTEXT_DEVICE_SHM &&
                   g_file_test ("/run/shm", G_FILE_TEST_IS_DIR))
-                flatpak_bwrap_add_args (bwrap,
-                                        "--bind", "/run/shm", "/run/shm",
-                                        NULL);
+                {
+                  flatpak_bwrap_add_args (bwrap,
+                                          "--bind", "/run/shm", "/run/shm",
+                                          NULL);
+                }
+              else if ((context->features & FLATPAK_CONTEXT_FEATURE_PER_APP_DEV_SHM)
+                       && per_app_dir_lock_fd >= 0)
+                {
+                  glnx_autofd int dev_shm_lock_fd = -1;
+                  g_autofree char *shared_dev_shm = NULL;
+
+                  /* The host and the original sandbox have separate /dev/shm,
+                   * but we want other instances to be able to share /dev/shm,
+                   * except for flatpak-spawn --subsandbox. */
+                  if (!flatpak_instance_ensure_per_app_dev_shm (app_id,
+                                                                per_app_dir_lock_fd,
+                                                                &dev_shm_lock_fd,
+                                                                &shared_dev_shm,
+                                                                error))
+                    return FALSE;
+
+                  flatpak_bwrap_add_fd (bwrap, glnx_steal_fd (&dev_shm_lock_fd));
+                  flatpak_bwrap_add_args (bwrap,
+                                          "--bind", shared_dev_shm, "/run/shm",
+                                          "--lock-file", "/run/shm/.flatpak-tmpdir",
+                                          NULL);
+                }
               else
-                flatpak_bwrap_add_args (bwrap,
-                                        "--dir", "/run/shm",
-                                        NULL);
+                {
+                  flatpak_bwrap_add_args (bwrap,
+                                          "--dir", "/run/shm",
+                                          NULL);
+                }
             }
           else
             g_warning ("Unexpected /dev/shm symlink %s", link);
@@ -1458,9 +1525,69 @@ flatpak_run_add_environment_args (FlatpakBwrap    *bwrap,
           if (real_dev_shm != NULL)
               flatpak_bwrap_add_args (bwrap, "--bind", real_dev_shm, "/dev/shm", NULL);
         }
+      else if ((context->features & FLATPAK_CONTEXT_FEATURE_PER_APP_DEV_SHM)
+               && per_app_dir_lock_fd >= 0)
+        {
+          glnx_autofd int dev_shm_lock_fd = -1;
+          g_autofree char *shared_dev_shm = NULL;
+
+          if (!flatpak_instance_ensure_per_app_dev_shm (app_id,
+                                                        per_app_dir_lock_fd,
+                                                        &dev_shm_lock_fd,
+                                                        &shared_dev_shm,
+                                                        error))
+            return FALSE;
+
+          flatpak_bwrap_add_fd (bwrap, glnx_steal_fd (&dev_shm_lock_fd));
+          flatpak_bwrap_add_args (bwrap,
+                                  "--bind", shared_dev_shm, "/dev/shm",
+                                  "--lock-file", "/dev/shm/.flatpak-tmpdir",
+                                  NULL);
+        }
     }
 
-  flatpak_context_append_bwrap_filesystem (context, bwrap, app_id, app_id_dir, previous_app_id_dirs, &exports);
+  exports = flatpak_context_get_exports_full (context,
+                                              app_id_dir, previous_app_id_dirs,
+                                              TRUE, TRUE,
+                                              xdg_dirs_conf, &home_access);
+
+  if (flatpak_exports_path_is_visible (exports, "/tmp"))
+    {
+      /* The original sandbox and any subsandboxes are both already
+       * going to share /tmp with the host, so by transitivity they will
+       * also share it with each other, and with all other instances. */
+    }
+  else if ((context->features & FLATPAK_CONTEXT_FEATURE_PER_APP_TMP)
+           && per_app_dir_lock_fd >= 0)
+    {
+      g_autofree char *shared_tmp = NULL;
+
+      /* The host and the original sandbox have separate /tmp,
+       * but we want other instances to be able to share /tmp with the
+       * first sandbox, unless they were created by
+       * flatpak-spawn --sandbox. Create it in
+       * ${per_app_parent}/${app_id}/tmp to maximize the chance that it's
+       * on a tmpfs.
+       *
+       * We're relying here on flatpak_run_add_xdg_runtime_dir_args() having
+       * already taken the lock on ${per_app_parent}/${app_id}/xdg-run/.ref
+       * that represents ${per_app_parent}/${app_id} being in use, so we
+       * don't create a separate lock file.
+       *
+       * In apply_extra and flatpak build, we just don't bother to do this. */
+      if (!flatpak_instance_ensure_per_app_tmp (app_id,
+                                                per_app_dir_lock_fd,
+                                                &shared_tmp,
+                                                error))
+        return FALSE;
+
+      flatpak_bwrap_add_args (bwrap,
+                              "--bind", shared_tmp, "/tmp",
+                              NULL);
+    }
+
+  flatpak_context_append_bwrap_filesystem (context, bwrap, app_id, app_id_dir,
+                                           exports, xdg_dirs_conf, home_access);
 
   if (context->sockets & FLATPAK_CONTEXT_SOCKET_WAYLAND)
     {
@@ -2045,64 +2172,6 @@ flatpak_app_compute_permissions (GKeyFile *app_metadata,
   return g_steal_pointer (&app_context);
 }
 
-static void
-flatpak_run_gc_ids (void)
-{
-  flatpak_instance_iterate_all_and_gc (NULL);
-}
-
-static char *
-flatpak_run_allocate_id (int *lock_fd_out)
-{
-  g_autofree char *user_runtime_dir = flatpak_get_real_xdg_runtime_dir ();
-  g_autofree char *base_dir = g_build_filename (user_runtime_dir, ".flatpak", NULL);
-  int count;
-
-  g_mkdir_with_parents (base_dir, 0755);
-
-  flatpak_run_gc_ids ();
-
-  for (count = 0; count < 1000; count++)
-    {
-      g_autofree char *instance_id = NULL;
-      g_autofree char *instance_dir = NULL;
-
-      instance_id = g_strdup_printf ("%u", g_random_int ());
-
-      instance_dir = g_build_filename (base_dir, instance_id, NULL);
-
-      /* We use an atomic mkdir to ensure the instance id is unique */
-      if (mkdir (instance_dir, 0755) == 0)
-        {
-          g_autofree char *lock_file = g_build_filename (instance_dir, ".ref", NULL);
-          glnx_autofd int lock_fd = -1;
-          struct flock l = {
-            .l_type = F_RDLCK,
-            .l_whence = SEEK_SET,
-            .l_start = 0,
-            .l_len = 0
-          };
-
-          /* Then we take a file lock inside the dir, hold that during
-           * setup and in bwrap. Anyone trying to clean up unused
-           * directories need to first verify that there is a .ref
-           * file and take a write lock on .ref to ensure its not in
-           * use. */
-          lock_fd = open (lock_file, O_RDWR | O_CREAT | O_CLOEXEC, 0644);
-          /* There is a tiny race here between the open creating the file and the lock succeeding.
-             We work around that by only gc:ing "old" .ref files */
-          if (lock_fd != -1 && fcntl (lock_fd, F_SETLK, &l) == 0)
-            {
-              *lock_fd_out = glnx_steal_fd (&lock_fd);
-              g_debug ("Allocated instance id %s", instance_id);
-              return g_steal_pointer (&instance_id);
-            }
-        }
-    }
-
-  return NULL;
-}
-
 #ifdef HAVE_DCONF
 
 static void
@@ -2327,6 +2396,75 @@ flatpak_run_add_dconf_args (FlatpakBwrap *bwrap,
   return TRUE;
 }
 
+static gboolean
+flatpak_run_add_xdg_runtime_dir_args (FlatpakBwrap *bwrap,
+                                      const char *app_id,
+                                      FlatpakRunFlags flags,
+                                      int *lock_fd_out,
+                                      GError **error)
+{
+  gboolean sandboxed = (flags & FLATPAK_RUN_FLAG_SANDBOX) != 0;
+
+  g_return_val_if_fail (bwrap != NULL, FALSE);
+  g_return_val_if_fail (app_id != NULL, FALSE);
+  g_return_val_if_fail (lock_fd_out != NULL, FALSE);
+  g_return_val_if_fail (*lock_fd_out == -1, FALSE);
+  g_return_val_if_fail (error == NULL || *error == NULL, FALSE);
+
+  /* The host and the original instance always have separate instances of
+   * XDG_RUNTIME_DIR, but we want other instances of the app to share it
+   * with the first instance, unless they are specifically protected
+   * (flatpak-spawn --sandbox) in which case each instance gets its own. */
+  if (!sandboxed)
+    {
+      glnx_autofd int lock_fd = -1;
+      g_autofree char *shared_xrd = NULL;
+      g_autofree char *old_flatpak_info = NULL;
+
+      if (!flatpak_instance_ensure_per_app_xdg_runtime_dir (app_id,
+                                                            &lock_fd,
+                                                            &shared_xrd,
+                                                            error))
+        return FALSE;
+
+      /* We create this symlink for backwards compatibility with older
+       * versions of Flatpak that had $XDG_RUNTIME_DIR/flatpak-info as
+       * the documented/preferred path instead of the more modern
+       * /.flatpak-info. We can only create the symlink the first time
+       * we create the shared XDG_RUNTIME_DIR, so we can't use
+       * bwrap --symlink, which fails on error. */
+      old_flatpak_info = g_build_filename (shared_xrd, "flatpak-info", NULL);
+
+      if (symlink ("../../../.flatpak-info", old_flatpak_info) < 0 && errno != EEXIST)
+        g_warning ("Unable to create symlink at %s: %s",
+                   old_flatpak_info, g_strerror (errno));
+
+      /* Use the xdg-run subdirectory of the per-app directory as this app's
+       * XDG_RUNTIME_DIR, shared between instances */
+      flatpak_bwrap_add_arg (bwrap, "--bind");
+      flatpak_bwrap_add_arg (bwrap, shared_xrd);
+      flatpak_bwrap_add_arg_printf (bwrap, "/run/user/%d", getuid ());
+
+      /* Tell bwrap to keep holding onto the lock on our behalf */
+      flatpak_bwrap_add_arg (bwrap, "--lock-file");
+      flatpak_bwrap_add_arg_printf (bwrap, "/run/user/%d/.ref", getuid ());
+
+      *lock_fd_out = glnx_steal_fd (&lock_fd);
+    }
+  else
+    {
+      g_autofree char *old_flatpak_info = g_strdup_printf ("/run/user/%d/flatpak-info",
+                                                           getuid ());
+
+      /* Create the symlink in this instance's private tmpfs */
+      flatpak_bwrap_add_args (bwrap,
+                              "--symlink", "../../../.flatpak-info", old_flatpak_info,
+                              NULL);
+    }
+
+  return TRUE;
+}
+
 gboolean
 flatpak_run_add_app_info_args (FlatpakBwrap       *bwrap,
                                GFile              *app_files,
@@ -2356,21 +2494,18 @@ flatpak_run_add_app_info_args (FlatpakBwrap       *bwrap,
   int fd, fd2, fd3;
   g_autoptr(GKeyFile) keyfile = NULL;
   g_autofree char *runtime_path = NULL;
-  g_autofree char *old_dest = g_strdup_printf ("/run/user/%d/flatpak-info", getuid ());
   const char *group;
   g_autofree char *instance_id = NULL;
   glnx_autofd int lock_fd = -1;
   g_autofree char *instance_id_host_dir = NULL;
   g_autofree char *instance_id_sandbox_dir = NULL;
   g_autofree char *instance_id_lock_file = NULL;
-  g_autofree char *user_runtime_dir = flatpak_get_real_xdg_runtime_dir ();
   g_autofree char *arch = flatpak_decomposed_dup_arch (runtime_ref);
 
-  instance_id = flatpak_run_allocate_id (&lock_fd);
+  instance_id = flatpak_instance_allocate_id (&instance_id_host_dir, &lock_fd);
   if (instance_id == NULL)
     return flatpak_fail_error (error, FLATPAK_ERROR_SETUP_FAILED, _("Unable to allocate instance id"));
 
-  instance_id_host_dir = g_build_filename (user_runtime_dir, ".flatpak", instance_id, NULL);
   instance_id_sandbox_dir = g_strdup_printf ("/run/user/%d/.flatpak/%s", getuid (), instance_id);
   instance_id_lock_file = g_build_filename (instance_id_sandbox_dir, ".ref", NULL);
 
@@ -2522,9 +2657,6 @@ flatpak_run_add_app_info_args (FlatpakBwrap       *bwrap,
                                   "--file", fd, "/.flatpak-info");
   flatpak_bwrap_add_args_data_fd (bwrap,
                                   "--ro-bind-data", fd2, "/.flatpak-info");
-  flatpak_bwrap_add_args (bwrap,
-                          "--symlink", "../../../.flatpak-info", old_dest,
-                          NULL);
 
   /* Tell the application that it's running under Flatpak in a generic way. */
   flatpak_bwrap_add_args (bwrap,
@@ -3505,6 +3637,7 @@ regenerate_ld_cache (GPtrArray    *base_argv_array,
                           "--dev", "/dev",
                           "--bind", flatpak_file_get_path_cached (ld_so_dir), "/run/ld-so-cache-dir",
                           NULL);
+  flatpak_bwrap_sort_envp (bwrap);
   flatpak_bwrap_envp_to_args (bwrap);
 
   if (!flatpak_bwrap_bundle_args (bwrap, 1, -1, FALSE, error))
@@ -3766,11 +3899,14 @@ flatpak_run_app (FlatpakDecomposed *app_ref,
   const char *app_target_path = "/app";
   const char *runtime_target_path = "/usr";
   struct stat s;
+  glnx_autofd int per_app_dir_lock_fd = -1;
 
   if (!check_sudo (error))
     return FALSE;
 
+  g_return_val_if_fail (app_ref != NULL, FALSE);
   app_id = flatpak_decomposed_dup_id (app_ref);
+  g_return_val_if_fail (app_id != NULL, FALSE);
   app_arch = flatpak_decomposed_dup_arch (app_ref);
 
   /* Check the user is allowed to run this flatpak. */
@@ -4145,6 +4281,13 @@ flatpak_run_app (FlatpakDecomposed *app_ref,
 
   flags |= flatpak_context_get_run_flags (app_context);
 
+  /* We have to set this up before we start mounting things into the
+   * XDG_RUNTIME_DIR in flatpak_run_setup_base_argv() and
+   * flatpak_run_add_app_info_args(), because otherwise it would shadow them. */
+  if (!flatpak_run_add_xdg_runtime_dir_args (bwrap, app_id, flags,
+                                             &per_app_dir_lock_fd, error))
+    return FALSE;
+
   if (!flatpak_run_setup_base_argv (bwrap, runtime_files, app_id_dir, app_arch, flags, error))
     return FALSE;
 
@@ -4180,8 +4323,12 @@ flatpak_run_app (FlatpakDecomposed *app_ref,
 
   if (!flatpak_run_add_environment_args (bwrap, app_info_path, flags,
                                          app_id, app_context, app_id_dir, previous_app_id_dirs,
+                                         per_app_dir_lock_fd,
                                          &exports, cancellable, error))
     return FALSE;
+
+  /* Hold onto the lock until we execute bwrap */
+  flatpak_bwrap_add_fd (bwrap, glnx_steal_fd (&per_app_dir_lock_fd));
 
   if ((app_context->shares & FLATPAK_CONTEXT_SHARED_NETWORK) != 0)
     flatpak_run_add_resolved_args (bwrap);
@@ -4246,6 +4393,7 @@ flatpak_run_app (FlatpakDecomposed *app_ref,
       command = default_command;
     }
 
+  flatpak_bwrap_sort_envp (bwrap);
   flatpak_bwrap_envp_to_args (bwrap);
 
   if (!flatpak_bwrap_bundle_args (bwrap, 1, -1, FALSE, error))

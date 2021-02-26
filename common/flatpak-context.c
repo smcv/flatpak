@@ -78,6 +78,8 @@ const char *flatpak_context_features[] = {
   "multiarch",
   "bluetooth",
   "canbus",
+  "per-app-dev-shm",
+  "per-app-tmp",
   NULL
 };
 
@@ -2064,6 +2066,12 @@ gboolean
 flatpak_context_adds_permissions (FlatpakContext *old,
                                   FlatpakContext *new)
 {
+  /* We allow upgrade to multiarch, that is really not a huge problem.
+   * Similarly, having sensible semantics for /dev/shm and /tmp is
+   * not a security concern. */
+  guint32 harmless_features = (FLATPAK_CONTEXT_FEATURE_MULTIARCH |
+                               FLATPAK_CONTEXT_FEATURE_PER_APP_DEV_SHM |
+                               FLATPAK_CONTEXT_FEATURE_PER_APP_TMP);
   guint32 old_sockets;
 
   if (adds_flags (old->shares & old->shares_valid,
@@ -2085,8 +2093,7 @@ flatpak_context_adds_permissions (FlatpakContext *old,
                   new->devices & new->devices_valid))
     return TRUE;
 
-  /* We allow upgrade to multiarch, that is really not a huge problem */
-  if (adds_flags ((old->features & old->features_valid) | FLATPAK_CONTEXT_FEATURE_MULTIARCH,
+  if (adds_flags ((old->features & old->features_valid) | harmless_features,
                   new->features & new->features_valid))
     return TRUE;
 
@@ -2429,11 +2436,11 @@ FlatpakExports *
 flatpak_context_get_exports (FlatpakContext *context,
                              const char     *app_id)
 {
-  g_autoptr(FlatpakExports) exports = flatpak_exports_new ();
   g_autoptr(GFile) app_id_dir = flatpak_get_data_dir (app_id);
 
-  flatpak_context_export (context, exports, app_id_dir, NULL, FALSE, NULL, NULL);
-  return g_steal_pointer (&exports);
+  return flatpak_context_get_exports_full (context,
+                                           app_id_dir, NULL,
+                                           FALSE, FALSE, NULL, NULL);
 }
 
 FlatpakRunFlags
@@ -2456,22 +2463,48 @@ flatpak_context_get_run_flags (FlatpakContext *context)
   return flags;
 }
 
+FlatpakExports *
+flatpak_context_get_exports_full (FlatpakContext *context,
+                                  GFile          *app_id_dir,
+                                  GPtrArray      *extra_app_id_dirs,
+                                  gboolean        do_create,
+                                  gboolean        include_default_dirs,
+                                  GString        *xdg_dirs_conf,
+                                  gboolean       *home_access_out)
+{
+  g_autoptr(FlatpakExports) exports = flatpak_exports_new ();
+
+  flatpak_context_export (context, exports,
+                          app_id_dir, extra_app_id_dirs,
+                          do_create, xdg_dirs_conf, home_access_out);
+
+  if (include_default_dirs)
+    {
+      g_autoptr(GFile) user_flatpak_dir = NULL;
+
+      /* Hide the flatpak dir by default (unless explicitly made visible) */
+      user_flatpak_dir = flatpak_get_user_base_dir_location ();
+      flatpak_exports_add_path_tmpfs (exports, flatpak_file_get_path_cached (user_flatpak_dir));
+
+      /* Ensure we always have a homedir */
+      flatpak_exports_add_path_dir (exports, g_get_home_dir ());
+    }
+
+  return g_steal_pointer (&exports);
+}
+
 void
 flatpak_context_append_bwrap_filesystem (FlatpakContext  *context,
                                          FlatpakBwrap    *bwrap,
                                          const char      *app_id,
                                          GFile           *app_id_dir,
-                                         GPtrArray       *extra_app_id_dirs,
-                                         FlatpakExports **exports_out)
+                                         FlatpakExports  *exports,
+                                         const GString   *xdg_dirs_conf,
+                                         gboolean         home_access)
 {
-  g_autoptr(FlatpakExports) exports = flatpak_exports_new ();
-  g_autoptr(GString) xdg_dirs_conf = g_string_new ("");
-  g_autoptr(GFile) user_flatpak_dir = NULL;
-  gboolean home_access = FALSE;
   GHashTableIter iter;
   gpointer key, value;
 
-  flatpak_context_export (context, exports, app_id_dir, extra_app_id_dirs, TRUE, xdg_dirs_conf, &home_access);
   if (app_id_dir != NULL)
     flatpak_run_apply_env_appid (bwrap, app_id_dir);
 
@@ -2508,14 +2541,8 @@ flatpak_context_append_bwrap_filesystem (FlatpakContext  *context,
                                 NULL);
     }
 
-  /* Hide the flatpak dir by default (unless explicitly made visible) */
-  user_flatpak_dir = flatpak_get_user_base_dir_location ();
-  flatpak_exports_add_path_tmpfs (exports, flatpak_file_get_path_cached (user_flatpak_dir));
-
-  /* Ensure we always have a homedir */
-  flatpak_exports_add_path_dir (exports, g_get_home_dir ());
-
-  /* This actually outputs the args for the hide/expose operations above */
+  /* This actually outputs the args for the hide/expose operations
+   * in the exports */
   flatpak_exports_append_bwrap_args (exports, bwrap);
 
   /* Special case subdirectories of the cache, config and data xdg
@@ -2573,7 +2600,4 @@ flatpak_context_append_bwrap_filesystem (FlatpakContext  *context,
       flatpak_bwrap_add_args_data (bwrap, "xdg-config-dirs",
                                    xdg_dirs_conf->str, xdg_dirs_conf->len, path, NULL);
     }
-
-  if (exports_out)
-    *exports_out = g_steal_pointer (&exports);
 }

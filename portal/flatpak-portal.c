@@ -999,18 +999,7 @@ handle_spawn (PortalFlatpak         *object,
         fd_map[i].to = ++max_fd;
     }
 
-  /* TODO: Ideally we should let `flatpak run` inherit the portal's
-   * environment, in case e.g. a LD_LIBRARY_PATH is needed to be able
-   * to run `flatpak run`, but tell it to start from a blank environment
-   * when running the Flatpak app; but this isn't currently possible, so
-   * for now we preserve existing behaviour. */
-  if (arg_flags & FLATPAK_SPAWN_FLAGS_CLEAR_ENV)
-    {
-      char *empty[] = { NULL };
-      env = g_strdupv (empty);
-    }
-  else
-    env = g_get_environ ();
+  env = g_get_environ ();
 
   g_ptr_array_add (flatpak_argv, g_strdup (FLATPAK_BINDIR "/flatpak"));
   g_ptr_array_add (flatpak_argv, g_strdup ("run"));
@@ -1080,6 +1069,9 @@ handle_spawn (PortalFlatpak         *object,
             }
         }
     }
+
+  if (arg_flags & FLATPAK_SPAWN_FLAGS_CLEAR_ENV)
+    g_ptr_array_add (flatpak_argv, g_strdup ("--clear-env"));
 
   /* Let the environment variables given by the caller override the ones
    * from extra_args. Don't add them to @env, because they are controlled

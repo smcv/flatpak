@@ -3719,7 +3719,18 @@ flatpak_run_app (FlatpakDecomposed *app_ref,
     return FALSE;
 
   /* Construct the bwrap context. */
-  bwrap = flatpak_bwrap_new (NULL);
+  if (flags & FLATPAK_RUN_FLAG_CLEAR_ENV)
+    {
+      /* TODO: After https://github.com/containers/bubblewrap/pull/401
+       * is merged and released, and we depend on a bubblewrap version
+       * that has it, we could use bwrap --clearenv instead */
+      bwrap = flatpak_bwrap_new (flatpak_bwrap_empty_env);
+    }
+  else
+    {
+      bwrap = flatpak_bwrap_new (NULL);
+    }
+
   flatpak_bwrap_add_arg (bwrap, flatpak_get_bwrap ());
 
   if (app_deploy == NULL)

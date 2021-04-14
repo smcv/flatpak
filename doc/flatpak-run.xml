@@ -400,6 +400,19 @@ key=v1;v2;
             </varlistentry>
 
             <varlistentry>
+                <term><option>--clear-env</option></term>
+
+                <listitem><para>
+                    Instead of inheriting environment variables from
+                    <command>flatpak run</command>, start from a blank
+                    environment. Any environment variables specified
+                    by the Context section of the application metadata
+                    or by the <option>--env</option> and
+                    <option>--env-fd</option> options are still set.
+                </para></listitem>
+            </varlistentry>
+
+            <varlistentry>
                 <term><option>--env=VAR=VALUE</option></term>
 
                 <listitem><para>

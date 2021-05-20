@@ -420,6 +420,13 @@ flatpak_context_set_env_var (FlatpakContext *context,
                              const char     *name,
                              const char     *value)
 {
+  if (g_hash_table_contains (context->env_vars, name))
+    flatpak_debug2 ("%p: Overwriting environment variable %s with %s",
+                    context, name, value);
+  else
+    flatpak_debug2 ("%p: Newly setting environment variable %s to %s",
+                    context, name, value);
+
   g_hash_table_insert (context->env_vars, g_strdup (name), g_strdup (value));
 }
 
@@ -880,9 +887,10 @@ flatpak_context_merge (FlatpakContext *context,
   context->features |= other->features;
   context->features_valid |= other->features_valid;
 
+  g_debug ("Merging environment variables from %p into %p", other, context);
   g_hash_table_iter_init (&iter, other->env_vars);
   while (g_hash_table_iter_next (&iter, &key, &value))
-    g_hash_table_insert (context->env_vars, g_strdup (key), g_strdup (value));
+    flatpak_context_set_env_var (context, key, value);
 
   g_hash_table_iter_init (&iter, other->persistent);
   while (g_hash_table_iter_next (&iter, &key, &value))
@@ -1116,6 +1124,7 @@ option_env_cb (const gchar *option_name,
       return FALSE;
     }
 
+  flatpak_debug2 ("%p: Parsed --env=%s=%s", context, split[0], split[1]);
   flatpak_context_set_env_var (context, split[0], split[1]);
   return TRUE;
 }
@@ -1144,6 +1153,8 @@ option_env_fd_cb (const gchar *option_name,
     return FALSE;
 
   p = g_bytes_get_data (env_block, &remaining);
+  flatpak_debug2 ("%p: Loaded %" G_GSIZE_FORMAT " bytes of environment variables from fd %" G_GUINT64_FORMAT,
+                  context, remaining, fd);
 
   /* env_block might not be \0-terminated */
   while (remaining > 0)
@@ -1163,6 +1174,7 @@ option_env_fd_cb (const gchar *option_name,
 
       env_var = g_strndup (p, equals - p);
       env_value = g_strndup (equals + 1, len - (equals - p) - 1);
+      flatpak_debug2 ("Parsed from --env-fd: %s=%s", env_var, env_value);
       flatpak_context_set_env_var (context, env_var, env_value);
       p += len;
       remaining -= len;
@@ -1196,6 +1208,7 @@ option_unset_env_cb (const gchar *option_name,
       return FALSE;
     }
 
+  flatpak_debug2 ("%p: Parsed --unset-env=%s", context, value);
   flatpak_context_set_env_var (context, value, NULL);
   return TRUE;
 }
@@ -1651,6 +1664,8 @@ flatpak_context_load_metadata (FlatpakContext *context,
           const char *key = keys[i];
           g_autofree char *value = g_key_file_get_string (metakey, FLATPAK_METADATA_GROUP_ENVIRONMENT, key, NULL);
 
+          flatpak_debug2 ("%p: Environment variable in [Environment]: %s=%s",
+                          context, key, value);
           flatpak_context_set_env_var (context, key, value);
         }
     }
@@ -1675,6 +1690,8 @@ flatpak_context_load_metadata (FlatpakContext *context,
         {
           const char *var = vars[i];
 
+          flatpak_debug2 ("%p: Environment variable in [Context] unset-environment: %s",
+                          context, var);
           flatpak_context_set_env_var (context, var, NULL);
         }
     }
@@ -2220,6 +2237,7 @@ flatpak_context_add_bus_filters (FlatpakContext *context,
 void
 flatpak_context_reset_non_permissions (FlatpakContext *context)
 {
+  flatpak_debug2 ("%p: Removing all environment variables", context);
   g_hash_table_remove_all (context->env_vars);
 }
 

@@ -1007,10 +1007,15 @@ handle_spawn (PortalFlatpak         *object,
   if (arg_flags & FLATPAK_SPAWN_FLAGS_CLEAR_ENV)
     {
       char *empty[] = { NULL };
+
+      flatpak_debug2 ("flatpak-portal: Starting from a blank environment");
       env = g_strdupv (empty);
     }
   else
-    env = g_get_environ ();
+    {
+      flatpak_debug2 ("flatpak-portal: Starting from portal's environment");
+      env = g_get_environ ();
+    }
 
   g_ptr_array_add (flatpak_argv, g_strdup (FLATPAK_BINDIR "/flatpak"));
   g_ptr_array_add (flatpak_argv, g_strdup ("run"));
@@ -1071,11 +1076,15 @@ handle_spawn (PortalFlatpak         *object,
                   continue;
                 }
 
+              flatpak_debug2 ("flatpak-portal: Environment variable from extra-args: %s",
+                              var_val);
               g_string_append (env_string, var_val);
               g_string_append_c (env_string, '\0');
             }
           else
             {
+              flatpak_debug2 ("flatpak-portal: Argument from extra-args: %s",
+                              extra_args[i]);
               g_ptr_array_add (flatpak_argv, g_strdup (extra_args[i]));
             }
         }
@@ -1111,6 +1120,8 @@ handle_spawn (PortalFlatpak         *object,
           return G_DBUS_METHOD_INVOCATION_HANDLED;
         }
 
+      flatpak_debug2 ("flatpak-portal: Environment variable from env: %s=%s",
+                      var, val);
       g_string_append (env_string, var);
       g_string_append_c (env_string, '=');
       g_string_append (env_string, val);
@@ -1120,6 +1131,9 @@ handle_spawn (PortalFlatpak         *object,
   if (env_string->len > 0)
     {
       g_auto(GLnxTmpfile) env_tmpf  = { 0, };
+
+      flatpak_debug2 ("flatpak-portal: Serializing %" G_GSIZE_FORMAT " bytes of environment variables",
+                      env_string->len);
 
       if (!flatpak_buffer_to_sealed_memfd_or_tmpfile (&env_tmpf, "environ",
                                                       env_string->str,
@@ -1155,6 +1169,7 @@ handle_spawn (PortalFlatpak         *object,
           return G_DBUS_METHOD_INVOCATION_HANDLED;
         }
 
+      flatpak_debug2 ("flatpak-portal: Unsetting environment variable %s", var);
       g_ptr_array_add (flatpak_argv,
                        g_strdup_printf ("--unset-env=%s", var));
     }

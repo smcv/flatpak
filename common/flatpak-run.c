@@ -1844,6 +1844,8 @@ flatpak_run_apply_env_vars (FlatpakBwrap *bwrap, FlatpakContext *context)
   GHashTableIter iter;
   gpointer key, value;
 
+  flatpak_debug2 ("Applying environment variables from %p", context);
+
   g_hash_table_iter_init (&iter, context->env_vars);
   while (g_hash_table_iter_next (&iter, &key, &value))
     {
@@ -1851,9 +1853,15 @@ flatpak_run_apply_env_vars (FlatpakBwrap *bwrap, FlatpakContext *context)
       const char *val = value;
 
       if (val)
-        flatpak_bwrap_set_env (bwrap, var, val, TRUE);
+        {
+          flatpak_debug2 ("%p: %s=%s", context, var, val);
+          flatpak_bwrap_set_env (bwrap, var, val, TRUE);
+        }
       else
-        flatpak_bwrap_unset_env (bwrap, var);
+        {
+          flatpak_debug2 ("%p: unset %s", context, var);
+          flatpak_bwrap_unset_env (bwrap, var);
+        }
     }
 }
 

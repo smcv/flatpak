@@ -1,0 +1,15 @@
+#!/bin/sh
+
+set -eu
+
+flatpak_dir="$1"
+make_test_runtime="$2"
+target="$3"
+stamp="$4"
+
+export PATH="$flatpak_dir:$PATH"
+
+rm -fr "$target"
+"$make_test_runtime" "$target" org.test.Platform master "" ""
+"$make_test_runtime" "$target" org.test.Platform stable "" ""
+touch "$stamp"

@@ -31,3 +31,4 @@ TEST_MATRIX_SOURCE=(
 )
 
 "./tests/expand-test-matrix.sh" --automake "${TEST_MATRIX_SOURCE[*]}" > tests/Makefile-test-matrix.am.inc
+"./tests/expand-test-matrix.sh" --meson "${TEST_MATRIX_SOURCE[*]}" > tests/test-matrix/meson.build

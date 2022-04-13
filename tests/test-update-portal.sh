@@ -36,9 +36,9 @@ make_updated_app
 NEW_COMMIT=$(cat repos/test/refs/heads/app/org.test.Hello/$ARCH/master)
 
 for i in {15..1}; do
-    if grep -q -e "update_available .* remote=${NEW_COMMIT}" update-monitor.out; then
+    if grep -q -e "update_available .* remote=${NEW_COMMIT}" update-monitor.out >&2; then
         assert_file_has_content update-monitor.out "running=${OLD_COMMIT} local=${OLD_COMMIT} remote=${NEW_COMMIT}"
-        echo found update ${NEW_COMMIT}
+        echo found update ${NEW_COMMIT} >&2
         break
     fi
     if [ $i == 1 ]; then
@@ -52,9 +52,9 @@ make_updated_app test "" master UPDATE2
 NEWER_COMMIT=$(cat repos/test/refs/heads/app/org.test.Hello/$ARCH/master)
 
 for i in {15..1}; do
-    if grep -q -e "update_available .* remote=${NEWER_COMMIT}"  update-monitor.out; then
+    if grep -q -e "update_available .* remote=${NEWER_COMMIT}"  update-monitor.out >&2; then
         assert_file_has_content update-monitor.out "running=${OLD_COMMIT} local=${OLD_COMMIT} remote=${NEWER_COMMIT}"
-        echo found update ${NEWER_COMMIT}
+        echo found update ${NEWER_COMMIT} >&2
         break
     fi
     if [ $i == 1 ]; then
@@ -90,7 +90,7 @@ mv repos/test/orig-objects repos/test/objects
 
 ok "update fail"
 
-${FLATPAK} ${U} mask "org.test.Hello*"
+${FLATPAK} ${U} mask "org.test.Hello*" >&2
 
 NEW_COMMIT=$(cat repos/test/refs/heads/app/org.test.Hello/$ARCH/master)
 
@@ -106,7 +106,7 @@ kill -9 $MONITOR_PID
 # Should be a "null" update due to mask
 run_with_sandboxed_bus ${test_builddir}/test-update-portal update-null monitor.pid
 
-${FLATPAK} ${U} mask --remove "org.test.Hello*"
+${FLATPAK} ${U} mask --remove "org.test.Hello*" >&2
 
 ok "update vs masked"
 

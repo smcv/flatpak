@@ -37,17 +37,17 @@ EOF
 setup_repo_no_add
 port=$(cat httpd-port)
 ${FLATPAK} --installation=history-installation remote-add \
-    --gpg-import=${FL_GPG_HOMEDIR}/pubring.gpg test-repo "http://127.0.0.1:${port}/test"
-${FLATPAK} --installation=history-installation install -y test-repo org.test.Hello master
+    --gpg-import=${FL_GPG_HOMEDIR}/pubring.gpg test-repo "http://127.0.0.1:${port}/test" >&2
+${FLATPAK} --installation=history-installation install -y test-repo org.test.Hello master >&2
 
 # appstream update shouldn't show up in history
-${FLATPAK} ${U} --appstream update test-repo
+${FLATPAK} ${U} --appstream update test-repo >&2
 
 # update, uninstall, and remote-delete should show up
 EXPORT_ARGS="" make_updated_app
-${FLATPAK} --installation=history-installation update -y org.test.Hello
-${FLATPAK} --installation=history-installation uninstall -y org.test.Platform org.test.Hello
-${FLATPAK} --installation=history-installation remote-delete test-repo
+${FLATPAK} --installation=history-installation update -y org.test.Hello >&2
+${FLATPAK} --installation=history-installation uninstall -y org.test.Platform org.test.Hello >&2
+${FLATPAK} --installation=history-installation remote-delete test-repo >&2
 
 # need --since and --columns here to make the test idempotent
 ${FLATPAK} --installation=history-installation history --since="${HISTORY_START_TIME}" \

@@ -94,11 +94,7 @@ test_exports_SOURCES = tests/test-exports.c
 
 test_instance_CFLAGS = $(testcommon_CFLAGS)
 test_instance_LDADD = $(testcommon_LDADD) libtestlib.la
-test_instance_SOURCES = \
-	subprojects/libglnx/tests/libglnx-testlib.c \
-	subprojects/libglnx/tests/libglnx-testlib.h \
-	tests/test-instance.c \
-	$(NULL)
+test_instance_SOURCES = tests/test-instance.c
 
 test_portal_CFLAGS = $(testcommon_CFLAGS)
 test_portal_LDADD = $(testcommon_LDADD) libtestlib.la

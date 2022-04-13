@@ -34,6 +34,7 @@
 
 #include "libglnx.h"
 #include "tests/libglnx-testlib.h"
+#include "tests/libglnx-testlib.c"
 
 #include "testlib.h"
 

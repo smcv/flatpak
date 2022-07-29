@@ -1,0 +1,441 @@
+<!DOCTYPE node PUBLIC
+"-//freedesktop//DTD D-BUS Object Introspection 1.0//EN"
+"http://www.freedesktop.org/standards/dbus/1.0/introspect.dtd">
+
+<!--
+  Copyright 2018 Red Hat, Inc.
+  Copyright 2022 Collabora Ltd.
+
+  SPDX-License-Identifier: LGPL-2.0-or-later
+
+  This library is free software; you can redistribute it and/or
+  modify it under the terms of the GNU Lesser General Public
+  License as published by the Free Software Foundation; either
+  version 2 of the License, or (at your option) any later version.
+
+  This library is distributed in the hope that it will be useful,
+  but WITHOUT ANY WARRANTY; without even the implied warranty of
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+  Lesser General Public License for more details.
+
+  You should have received a copy of the GNU Lesser General
+  Public License along with this library; if not, write to the
+  Free Software Foundation, Inc., 51 Franklin Street, Fifth Floor,
+  Boston, MA 02110-1301, USA.
+-->
+
+<node name="/" xmlns:doc="http://www.freedesktop.org/dbus/1.0/doc.dtd">
+  <!--
+    org.freedesktop.Flatpak.LaunchCommand1:
+    @short_description: Common interface to launch a command
+
+    This interface is shared by org.freedesktop.Flatpak.Development
+    (which launches commands on the host system)
+    and org.freedesktop.portal.Flatpak
+    (which launches commands in a new Flatpak sub-sandbox).
+
+    This documentation describes version 0 of this interface.
+  -->
+  <interface name='org.freedesktop.Flatpak.Exec1'>
+
+    <!--
+      The minor version of the LaunchCommand1 interface.
+
+      Backwards-compatible feature additions result in this number being
+      incremented.
+
+      Non-backwards-compatible behaviour changes result in the name of
+      the interface being changed, and this number being reset to 0.
+    -->
+    <property name="Version" type="u" access="read"/>
+
+    <!--
+      A list of supported options for the @options dictionary passed to
+      the Launch method.
+    -->
+    <property name="SupportedOptions" type="as" access="read"/>
+
+    <!--
+      Launch:
+      @argv: The argv for the new process, starting with the executable to launch
+      @fds: An array of file descriptors to pass to the new process
+      @options: Vardict with optional further information
+      @pid: the PID of the new process
+
+      This method executes a command.
+
+      Unknown (unsupported) options in the options dictionary are an error
+      and will cause the method to fail without launching the command.
+      The SupportedOptions property can be used to query the supported
+      options.
+
+      The following options are supported:
+
+      <variablelist>
+
+        <varlistentry>
+          <term>app-fd h</term>
+          <listitem><para>
+            A file descriptor for the directory that will be used as
+            <filename>/app</filename> in the new sandbox, instead of the
+            <filename>files</filename> directory
+            from the caller's Flatpak app. The caller's Flatpak app
+            files and extensions will be
+            mounted on <filename>/run/parent/app</filename>, with
+            filenames like <filename>/run/parent/app/bin/myapp</filename>.
+          </para><para>
+            This option and the <option>empty-app</option>
+            option are mutually exclusive.
+          </para><para>
+            The file descriptor must be opened with O_PATH and
+            O_NOFOLLOW and cannot be a symlink.
+          </para><para>
+            This option is only applicable in the flatpak-portal
+            (sub-sandboxing) interface.
+          </para></listitem>
+        </varlistentry>
+
+        <varlistentry>
+          <term>clear-env b</term>
+          <listitem><para>
+            If true, clear the environment (as if via env -i) before
+            starting the new process.
+            The default is false.
+          </para></listitem>
+        </varlistentry>
+
+        <varlistentry>
+          <term>empty-app b</term>
+          <listitem><para>
+            If true, don't provide app files at <filename>/app</filename> in
+            the new sandbox. Instead, <filename>/app</filename> will be an
+            empty directory.
+          </para><para>
+            As with the <option>app-fd</option> option, the caller's
+            Flatpak app files and extensions will be mounted on
+            <filename>/run/parent/app</filename>, with
+            filenames like <filename>/run/parent/app/bin/myapp</filename>.
+          </para><para>
+            This flag and the <option>app-fd</option>
+            option are mutually exclusive.
+          </para><para>
+            This option is only applicable in the flatpak-portal
+            (sub-sandboxing) interface. The default is false.
+          </para></listitem>
+        </varlistentry>
+
+        <varlistentry>
+          <term>env aay</term>
+          <listitem><para>
+            A list of environment variables, each in the form
+            "NAME=VALUE" followed by an optional ASCII NUL (byte with value 0).
+            The new process will be started with these environment
+            variables set.
+            The NAME can contain any byte except for 0 (NUL) and 61 (=).
+            The VALUE can contain any byte except for 0.
+          </para></listitem>
+        </varlistentry>
+
+        <varlistentry>
+          <term>expose-pids b</term>
+          <listitem><para>
+            If true, expose the sub-sandbox process IDs in the caller's
+            sandbox by making its process ID namespace a child of the
+            caller's process ID namespace.
+            If false, create a separate, parallel process ID namespace
+            for the sub-sandbox.
+            This option is only applicable in the flatpak-portal
+            (sub-sandboxing) interface, and only if using unprivileged user
+            namespaces to start containers (non-setuid bubblewrap).
+            This option and share-pids cannot both be used.
+            The default is false.
+          </para></listitem>
+        </varlistentry>
+
+        <varlistentry>
+          <term>inherit-env aay</term>
+          <listitem><para>
+            A list of environment variable names, each followed by an
+            optional ASCII NUL (byte with value 0).
+            The new process will be started with these environment variables
+            inherited from the service that implements this method, even if
+            clear-env was specified.
+            Each name can contain any byte except for 0.
+          </para></listitem>
+        </varlistentry>
+
+        <varlistentry>
+          <term>latest-version b</term>
+          <listitem><para>
+            If true, launch the latest version of an app.
+            If false, launch the same version that is invoking this method.
+            This option is only applicable in the flatpak-portal
+            (sub-sandboxing) interface.
+            The default is false.
+          </para></listitem>
+        </varlistentry>
+
+        <varlistentry>
+          <term>network b</term>
+          <listitem><para>
+            This option is only applicable in the flatpak-portal
+            (sub-sandboxing) interface.
+            The default is true.
+          </para></listitem>
+        </varlistentry>
+
+        <varlistentry>
+          <term>notify-start b</term>
+          <listitem><para>
+            Emit a Started signal once the sub-sandboxed process
+            has been fully started.
+            This option is only applicable in the flatpak-portal
+            (sub-sandboxing) interface.
+            The default is false.
+            TODO: Do we need this as an option or can we make it unconditional?
+          </para></listitem>
+        </varlistentry>
+
+        <varlistentry>
+          <term>sandbox b</term>
+          <listitem><para>
+            If true, launch the app in a restricted sandbox,
+            equivalent to the sandbox option of flatpak run.
+            If false, launch the app with the same permissions as the
+            process that is invoking this method.
+            This option is only applicable in the flatpak-portal
+            (sub-sandboxing) interface.
+            The default is false.
+          </para></listitem>
+        </varlistentry>
+
+        <varlistentry>
+          <term>sandbox-expose as</term>
+          <listitem><para>
+            A list of filenames for files inside the sandbox that will be exposed
+            to the new sandbox, for reading and writing. Note that absolute paths
+            or subdirectories are not allowed.
+          </para><para>
+            The files must be in the <filename>sandbox</filename> subdirectory of
+            the instance directory (i.e. <filename>~/.var/app/$APP_ID/sandbox</filename>).
+          </para><para>
+            This option is only applicable in the flatpak-portal
+            (sub-sandboxing) interface.
+          </para></listitem>
+        </varlistentry>
+
+        <varlistentry>
+          <term>sandbox-expose-ro as</term>
+          <listitem><para>
+            A list of filenames for files inside the sandbox that will be exposed
+            to the new sandbox, readonly. Note that absolute paths or subdirectories
+            are not allowed.
+          </para><para>
+            The files must be in the <filename>sandbox</filename> subdirectory of
+            the instance directory (i.e. <filename>~/.var/app/$APP_ID/sandbox</filename>).
+          </para><para>
+            This option is only applicable in the flatpak-portal
+            (sub-sandboxing) interface.
+          </para></listitem>
+        </varlistentry>
+
+        <varlistentry>
+          <term>sandbox-expose-fd ah</term>
+          <listitem><para>
+            A list of file descriptor for files inside the sandbox that will be exposed
+            to the new sandbox, for reading and writing (if the caller has write access).
+            The file descriptors must be opened with O_PATH and O_NOFOLLOW and cannot be symlinks.
+          </para><para>
+            This option is only applicable in the flatpak-portal
+            (sub-sandboxing) interface.
+          </para></listitem>
+        </varlistentry>
+
+        <varlistentry>
+          <term>sandbox-expose-fd-ro ah</term>
+          <listitem><para>
+            A list of file descriptor for files inside the sandbox that will be exposed
+            to the new sandbox, readonly. The file descriptors must be opened with O_PATH and O_NOFOLLOW and cannot be symlinks.
+          </para><para>
+            This option is only applicable in the flatpak-portal
+            (sub-sandboxing) interface.
+          </para></listitem>
+        </varlistentry>
+
+        <varlistentry>
+           <term>sandbox-flags u</term>
+           <listitem><para>
+           Flags affecting the created sandbox. The following flags values are supported:
+           <variablelist>
+            <varlistentry>
+              <term>1</term>
+              <listitem><para>
+                Share the display access (X11, wayland) with the caller.
+              </para></listitem>
+            </varlistentry>
+            <varlistentry>
+              <term>2</term>
+              <listitem><para>
+                Share the sound access (pulseaudio) with the caller.
+              </para></listitem>
+            </varlistentry>
+            <varlistentry>
+              <term>4</term>
+              <listitem><para>
+                Share the gpu access with the caller.
+              </para></listitem>
+            </varlistentry>
+            <varlistentry>
+              <term>8</term>
+              <listitem><para>
+                Allow sandbox access to (filtered) session bus.
+             </para></listitem>
+            </varlistentry>
+            <varlistentry>
+              <term>16</term>
+              <listitem><para>
+                Allow sandbox access to accessibility bus.
+              </para></listitem>
+            </varlistentry>
+          </variablelist>
+          </para><para>
+            This option is only applicable in the flatpak-portal
+            (sub-sandboxing) interface.
+          </para></listitem>
+        </varlistentry>
+
+        <varlistentry>
+          <term>share-pids b</term>
+          <listitem><para>
+            If true, the sub-sandbox will share its process ID namespace
+            with the caller.
+            If false, create a new process ID namespace for the sub-sandbox.
+            This option is only applicable in the flatpak-portal
+            (sub-sandboxing) interface, and only if using unprivileged user
+            namespaces to start containers (non-setuid bubblewrap).
+            This option and expose-pids cannot both be used.
+            The default is false.
+          </para></listitem>
+        </varlistentry>
+
+        <varlistentry>
+          <term>unset-env aay</term>
+          <listitem><para>
+            A list of environment variable names, each followed by an
+            optional ASCII NUL (byte with value 0).
+            The new process will be started with these environment variables
+            unset.
+            Each name can contain any byte except for 0.
+          </para></listitem>
+        </varlistentry>
+
+        <varlistentry>
+          <term>usr-fd h</term>
+          <listitem><para>
+            A file descriptor for the directory that will be used as
+            <filename>/usr</filename> in the new sandbox, instead of the
+            <filename>files</filename> directory
+            from the caller's Flatpak runtime.
+            The new sandbox's <filename>/etc</filename> will be based
+            on the <filename>etc</filename> subdirectory of the given
+            directory, and compatibility symlinks in its
+            root directory (<filename>/lib</filename>,
+            <filename>/bin</filename> and so on) will point into the
+            given directory. The caller's Flatpak runtime and its
+            extensions will be mounted on
+            <filename>/run/parent/usr</filename>, with filenames like
+            <filename>/run/parent/usr/bin/env</filename>,
+            and compatibility symlinks like
+            <filename>/run/parent/bin</filename> →
+            <filename>usr/bin</filename>.
+          </para><para>
+            The file descriptor must be opened with O_PATH and
+            O_NOFOLLOW and cannot be a symlink.
+          </para><para>
+            This option is only applicable in the flatpak-portal
+            (sub-sandboxing) interface.
+          </para></listitem>
+        </varlistentry>
+
+        <varlistentry>
+          <term>watch-bus b</term>
+          <listitem><para>
+            If true, terminate the command when the calling process
+            disappears from the message bus. If false, do not.
+            If unspecified, use a default behaviour.
+          </para></listitem>
+        </varlistentry>
+
+      </variablelist>
+
+      If the same environment variable name appears in more than one of
+      the env, inherit-env and/or unset-env options, the value of that
+      environment variable is unspecified.
+    -->
+    <method name="Launch">
+      <annotation name="org.gtk.GDBus.C.UnixFD" value="true"/>
+      <arg type='aay' name='argv' direction='in'/>
+      <arg type='a{uh}' name='fds' direction='in'/>
+      <arg type="a{sv}" name="options" direction="in"/>
+      <arg type='u' name='pid' direction='out'/>
+    </method>
+
+    <!--
+      SendSignal:
+      @pid: the PID inside the container to signal
+      @signal: the signal to send (see <citerefentry><refentrytitle>signal</refentrytitle><manvolnum>7</manvolnum></citerefentry>)
+      @to_process_group: whether to send the signal to the process group
+
+      Send a Unix signal to a process
+      that was started with org.freedesktop.Flatpak.LaunchCommand1.Launch().
+      The @pid argument here should be the PID that is returned
+      by the Launch() call: it is not necessarily valid in the caller's
+      PID namespace.
+      -->
+    <method name="SpawnSignal">
+      <arg type='u' name='pid' direction='in'/>
+      <arg type='u' name='signal' direction='in'/>
+      <arg type='b' name='to_process_group' direction='in'/>
+    </method>
+
+    <!--
+      Started:
+      @pid: the PID of the process that has been started
+      @relpid: the PID of the process relative to the current namespace.
+        This is only non-zero if the expose-pids or share-pids option was
+        passed to Launch(), and it may still be zero if
+        the process exits before its relative PID could be read.
+
+      Emitted when a process started by Launch() has fully started.
+      In other words, Launch() returns once the sandbox
+      has been started, and this signal is emitted once the process inside
+      itself is started.
+    -->
+    <signal name="Started">
+      <arg type='u' name='pid' direction='out'/>
+      <arg type='u' name='relpid' direction='out'/>
+    </signal>
+
+    <!--
+      Exited:
+      @pid: the PID of the process that has ended
+      @wait_status: the wait status (see <citerefentry><refentrytitle>waitpid</refentrytitle><manvolnum>2</manvolnum></citerefentry>)
+
+      Emitted when a process started by Launch() exits.
+      Use g_spawn_check_wait_status(), or the macros such as
+      WIFEXITED documented in
+      <citerefentry><refentrytitle>waitpid</refentrytitle><manvolnum>2</manvolnum></citerefentry>,
+      to interpret the @wait_status.
+
+      This signal is not emitted for processes that were not launched
+      directly by Launch(), for example if a process launched by
+      Launch() runs foreground or background child processes.
+    -->
+    <signal name="Exited">
+      <arg type='u' name='pid' direction='out'/>
+      <arg type='u' name='wait_status' direction='out'/>
+    </signal>
+
+  </interface>
+
+</node>

@@ -243,9 +243,9 @@ jobs:
     - name: Build flatpak
       run: make -C _build -j $(getconf _NPROCESSORS_ONLN)
     - name: Distcheck
-      run: make -C _build distcheck
+      run: make -C _build distcheck -j $(getconf _NPROCESSORS_ONLN)
     - name: Run tests under valgrind
-      run: make -C _build check
+      run: make -C _build check -j $(getconf _NPROCESSORS_ONLN)
       env:
         FLATPAK_TESTS_VALGRIND: true
     - name: Collect overall test logs on failure
